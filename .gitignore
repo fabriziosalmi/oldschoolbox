@@ -1,0 +1,41 @@
+# Build
+build/
+cmake-build-*/
+*.user
+
+# macOS
+.DS_Store
+*.dSYM/
+.AppleDouble
+.LSOverride
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# VSCode / CLion
+.vscode/
+.idea/
+*.code-workspace
+
+# Compiled plugins (distributed as release artifacts, not tracked)
+*.vst3
+*.component
+*.vst
+*.au
+
+# JUCE cache
+JUCE/extras/
+JUCE/examples/
+JUCE/.git/
+
+# Conan / vcpkg
+conan_imports_manifest.txt
+
+# Claude
+.claude/
+
+# Reference files
+references/
