@@ -952,11 +952,11 @@ public:
             return;
         }
 
-        if (text == "C" || text == "P")
+        if (btn.getComponentID() == "copyBtn" || btn.getComponentID() == "pasteBtn")
         {
             const auto col = hover ? SpaceColours::txtBright() : SpaceColours::txtMid();
             g.setColour(col);
-            if (text == "C")
+            if (btn.getComponentID() == "copyBtn")
             {
                 // Copy: two overlapping rounded sheets
                 g.drawRoundedRectangle(cx - 4.5f, cy - 4.5f, 6.2f, 7.2f, 1.1f, 1.1f);

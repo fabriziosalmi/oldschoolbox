@@ -10,6 +10,7 @@
 #include "../core/MidiLearn.h"
 #include "../core/ChaosSampleBus.h"
 #include "../core/BeatLfo.h"
+#include "../core/ChannelPatternPresets.h"
 #include "ParamPanel.h"
 #include "DjKnob.h"
 
@@ -120,8 +121,13 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>                     mixHatsPanAttachment;
     std::array<ParamKnobGroup, NUM_CH>                                                        channelParams;
 
-    // Per-channel view page
+    // Per-channel view page & 4-slot quick jam pattern presets
     std::array<int, NUM_CH> viewPage {};
+    std::array<std::array<ChannelPatternPresets::Slot, ChannelPatternPresets::SLOTS_PER_CH>, NUM_CH> quickSlots {};
+    std::array<int, NUM_CH> activeQuickSlot {};
+
+    // Layout rects
+    juce::Rectangle<int> stripQuickSlotRect(int ch) const;
 
     // CRT Scope phosphor persistence
     static constexpr int SCOPE_HIST = 4;

@@ -369,9 +369,11 @@ StepGrid::StepGrid(Sequencer& seq, VoiceBank& voices, juce::AudioProcessorValueT
                 sequencer.clipboardBassNotes[static_cast<size_t>(s)] = sequencer.getBassNoteOffset(bi, s);
         }
     };
+    coreCopyBtn.setComponentID("copyBtn");
     addAndMakeVisible(coreCopyBtn);
 
     corePasteBtn.setButtonText("P");
+    corePasteBtn.setComponentID("pasteBtn");
     corePasteBtn.setTooltip("Paste copied pattern into selected channel");
     corePasteBtn.onClick = [this] {
         const int ch = selectedChannel;
@@ -447,6 +449,13 @@ StepGrid::StepGrid(Sequencer& seq, VoiceBank& voices, juce::AudioProcessorValueT
 
     setSelectedChannel(0);
     setCoreScreen(CoreScreen::Seq);
+    for (int ch = 0; ch < NUM_CH; ++ch)
+    {
+        activeQuickSlot[idx(ch)] = -1;
+        for (int s = 0; s < ChannelPatternPresets::SLOTS_PER_CH; ++s)
+            quickSlots[idx(ch)][static_cast<size_t>(s)] = ChannelPatternPresets::factorySlot(ch, s);
+    }
+
     syncFromSequencer();
     startTimerHz(60);
 }
@@ -721,6 +730,15 @@ juce::Rectangle<float> StepGrid::stripFlipLfoRect(int ch) const
         return { static_cast<float>(knobAreaX + 8), static_cast<float>(sr.getY() + 38), static_cast<float>(knobAreaW - 16), 76.0f };
     // SNARE / TOM / PERC1 / PERC2: 1 PAN knob (left) + spacious LFO card (right)
     return { static_cast<float>(knobAreaX + 74), static_cast<float>(sr.getY() + 38), static_cast<float>(knobAreaW - 82), 76.0f };
+}
+
+juce::Rectangle<int> StepGrid::stripQuickSlotRect(int ch) const
+{
+    const auto sr = stripRect(ch);
+    const bool rightCol = (ch >= 4);
+    // Mirror-symmetric 4-slot segmented pill right next to FLIP (zero knob overlap!)
+    const int x = rightCol ? (sr.getX() + 42) : (sr.getRight() - 112);
+    return { x, sr.getBottom() - 20, 68, 15 };
 }
 
 void StepGrid::resized()
@@ -1205,6 +1223,43 @@ void StepGrid::paintChannelStrips(juce::Graphics& g)
             g.setFont(SpaceArt::monoFont(7.8f, true));
             g.setColour(SpaceColours::textBright);
             g.drawText("DEPTH " + juce::String(static_cast<int>(std::round(dep * 100.0f))) + "%", depR.toNearestInt(), juce::Justification::centred);
+        }
+
+        // Quick Jam 4-Slot Pattern Preset Pill (1 | 2 | 3 | 4) right next to FLIP
+        {
+            const auto qr = stripQuickSlotRect(ch).toFloat();
+            const float segW = qr.getWidth() / 4.0f;
+            const int actSlot = activeQuickSlot[idx(ch)];
+            g.setColour(th.isLight ? juce::Colour(0xffe6e5df) : juce::Colour(0xff12141a));
+            g.fillRoundedRectangle(qr, 2.5f);
+
+            for (int s = 0; s < 4; ++s)
+            {
+                const auto cell = juce::Rectangle<float>(qr.getX() + static_cast<float>(s) * segW, qr.getY(), segW, qr.getHeight());
+                const bool isAct = (s == actSlot);
+                if (isAct)
+                {
+                    g.setColour(chCol.withAlpha(th.isLight ? 0.28f : 0.34f));
+                    g.fillRoundedRectangle(cell.reduced(0.8f), 2.0f);
+                }
+                if (s > 0)
+                {
+                    g.setColour(th.sectionLine.withAlpha(0.55f));
+                    g.drawVerticalLine(static_cast<int>(cell.getX()), qr.getY() + 2.0f, qr.getBottom() - 2.0f);
+                }
+                g.setFont(SpaceArt::monoFont(7.6f, true));
+                g.setColour(isAct ? (th.isLight ? chCol.darker(0.25f) : juce::Colours::white) : SpaceColours::txtDim());
+                g.drawText(juce::String(s + 1), cell.toNearestInt(), juce::Justification::centred);
+
+                // Tiny custom-saved indicator dot at top-right if user Shift+Clicked to store custom groove
+                if (quickSlots[idx(ch)][static_cast<size_t>(s)].isCustom)
+                {
+                    g.setColour(chCol.withAlpha(0.90f));
+                    g.fillEllipse(cell.getRight() - 3.6f, cell.getY() + 1.8f, 2.2f, 2.2f);
+                }
+            }
+            g.setColour(th.sectionLine.withAlpha(0.75f));
+            g.drawRoundedRectangle(qr, 2.5f, 0.75f);
         }
 
         // Panel subtle top bevel + clean negative-space separation (no heavy boxy borders!)
@@ -2370,6 +2425,43 @@ void StepGrid::mouseDown(const juce::MouseEvent& e)
             }
             setSelectedChannel(ch);
             voiceBank.requestTrigger(ch);
+            return;
+        }
+        // Quick Jam 4-Slot Pattern Preset Pill (Click: load | Shift+Click: save custom | Alt+Click: vary)
+        const auto qr = stripQuickSlotRect(ch);
+        if (qr.contains(e.x, e.y))
+        {
+            const int slotIdx = std::clamp((e.x - qr.getX()) * 4 / std::max(1, qr.getWidth()), 0, 3);
+            if (e.mods.isShiftDown() || e.mods.isCommandDown())
+            {
+                quickSlots[idx(ch)][static_cast<size_t>(slotIdx)] = ChannelPatternPresets::capture(sequencer, ch);
+                activeQuickSlot[idx(ch)] = slotIdx;
+                MusicalUnits::hud().text = juce::String(kChannelTitles[ch]) + "  SAVED SLOT " + juce::String(slotIdx + 1);
+                MusicalUnits::hud().activeParamId.clear();
+                MusicalUnits::hud().lastUpdateMs = juce::Time::getMillisecondCounterHiRes();
+            }
+            else if (e.mods.isAltDown())
+            {
+                undoRef.push(sequencer);
+                sequencer.smartRandomize(ch);
+                activeQuickSlot[idx(ch)] = slotIdx;
+                MusicalUnits::hud().text = juce::String(kChannelTitles[ch]) + "  VARIED SLOT " + juce::String(slotIdx + 1);
+                MusicalUnits::hud().activeParamId.clear();
+                MusicalUnits::hud().lastUpdateMs = juce::Time::getMillisecondCounterHiRes();
+            }
+            else
+            {
+                undoRef.push(sequencer);
+                ChannelPatternPresets::apply(quickSlots[idx(ch)][static_cast<size_t>(slotIdx)], sequencer, ch);
+                activeQuickSlot[idx(ch)] = slotIdx;
+                const char* nm = quickSlots[idx(ch)][static_cast<size_t>(slotIdx)].isCustom
+                    ? "CUSTOM" : ChannelPatternPresets::slotTooltip(ch, slotIdx);
+                MusicalUnits::hud().text = juce::String(kChannelTitles[ch]) + "  P" + juce::String(slotIdx + 1) + "  " + nm;
+                MusicalUnits::hud().activeParamId.clear();
+                MusicalUnits::hud().lastUpdateMs = juce::Time::getMillisecondCounterHiRes();
+            }
+            setSelectedChannel(ch);
+            repaint();
             return;
         }
         if (isFlipped[idx(ch)])
