@@ -116,6 +116,8 @@ namespace ParamId
 
     // Live FX & Master Sound System controls
     constexpr const char* DUB_THROW     = "dub_throw";    // momentary delay feedback throw
+    constexpr const char* SPIRAL_DRIVE  = "spiral_drive"; // Spiral FX distortion/grit range (0..1)
     constexpr const char* MONO_SUB      = "mono_sub";     // M/S mono-maker < 120 Hz
     constexpr const char* DJ_FILTER     = "dj_filter";    // bipolar DJ isolator (-1 LP .. 0 bypass .. +1 HP)
+    constexpr const char* MASTER_VOL    = "master_vol";   // Master output fader (0..1.25, 1.0 = 0 dB unity)
 }

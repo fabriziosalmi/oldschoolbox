@@ -11,6 +11,7 @@
 #include "../voices/Perc2Voice.h"
 #include "../voices/BassVoice.h"
 #include "BusLayout.h"
+#include "BeatLfo.h"
 
 // Sidechain ducker: kick triggers a click-free 1 ms attack / exponential release envelope.
 struct SidechainDucker
@@ -78,8 +79,11 @@ public:
     // Master FX wet ducking driven by kick (audio thread)
     float tickFxDuck() { return fxDuck.tick(); }
 
+    void setLfoBank(const BeatLfoBank* bank) { lfoBank = bank; }
+
 private:
     juce::AudioProcessorValueTreeState& apvts;
+    const BeatLfoBank* lfoBank = nullptr;
     double storedSampleRate = 44100.0;
 
     KickVoice  kick;
@@ -99,6 +103,7 @@ private:
     std::array<float, OsbBus::COUNT>             channelVelocity {};
 
     float raw(const char* id) const;
+    float modded(int ch, int targetSlot, const char* id) const;
     static bool validBus(int ch) { return ch >= 0 && ch < OsbBus::COUNT; }
     static bool validBass(int idx) { return idx == 0 || idx == 1; }
     static std::size_t busIndex(int ch) { return static_cast<std::size_t>(ch); }

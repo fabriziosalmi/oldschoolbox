@@ -1,6 +1,8 @@
 #include "ParamLayout.h"
 #include "ParamIds.h"
 #include "BusLayout.h"
+#include <algorithm>
+#include <cmath>
 
 namespace ParamLayout
 {
@@ -68,15 +70,36 @@ juce::AudioProcessorValueTreeState::ParameterLayout create()
     addF(ParamId::PERC2_NOISE, "Perc2 Noise", 0.f,   1.f,    0.01f,  0.50f);
     addF(ParamId::PERC2_PITCH, "Perc2 Pitch", 0.f,   1.f,    0.01f,  0.40f);
 
+    // True musical logarithmic (octave-per-degree) range for 303 Cutoff (20 Hz .. 20 kHz):
+    // 0%=20Hz, 10%=40Hz, 20%=80Hz, 30%=160Hz, 40%=317Hz, 50%=632Hz, 60%=1.26k, 80%=5k, 100%=20k.
+    // Continuous (no 1 Hz integer snap) so there is zero dead zone or stepping at low frequencies.
+    auto makeLogCutoffRange = []()
+    {
+        return juce::NormalisableRange<float>(
+            20.f, 20000.f,
+            [](float lo, float hi, float norm) {
+                return lo * std::pow(hi / lo, std::clamp(norm, 0.0f, 1.0f));
+            },
+            [](float lo, float hi, float val) {
+                const float v = std::clamp(val, lo, hi);
+                return std::log(v / lo) / std::log(hi / lo);
+            },
+            [](float lo, float hi, float val) {
+                return std::clamp(val, lo, hi);
+            });
+    };
+
     // ── Bass1 (saw 303) ──
-    addF(ParamId::BASS1_CUTOFF, "Bass1 Cutoff",  20.f, 20000.f, 1.f,   450.f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{ ParamId::BASS1_CUTOFF, 1 }, "Bass1 Cutoff", makeLogCutoffRange(), 450.f));
     addF(ParamId::BASS1_RESO,   "Bass1 Reso",    0.f,  1.f,     0.01f, 0.55f);
     addF(ParamId::BASS1_ENVMOD, "Bass1 EnvMod",  0.f,  1.f,     0.01f, 0.45f);
     addF(ParamId::BASS1_DECAY,  "Bass1 Decay",   0.01f, 1.f,    0.001f, 0.22f);
     addF(ParamId::BASS1_ACCENT, "Bass1 Accent",  0.f,  1.f,     0.01f, 0.35f);
 
-    // ── Bass2 (acid 303) — defaults that leave room for cutoff/reso to do work ──
-    addF(ParamId::BASS2_CUTOFF, "Bass2 Cutoff",  20.f, 20000.f, 1.f,   400.f);
+    // ── Bass2 (acid 303) ──
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{ ParamId::BASS2_CUTOFF, 1 }, "Bass2 Cutoff", makeLogCutoffRange(), 400.f));
     addF(ParamId::BASS2_RESO,   "Bass2 Reso",    0.f,  1.f,     0.01f, 0.65f);
     addF(ParamId::BASS2_ENVMOD, "Bass2 EnvMod",  0.f,  1.f,     0.01f, 0.55f);
     addF(ParamId::BASS2_DECAY,  "Bass2 Decay",   0.01f, 1.f,    0.001f, 0.20f);
@@ -131,12 +154,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout create()
     addF(ParamId::CHAOS_PITCH,   "Chaos Pitch",   0.f, 1.f, 0.01f, 0.40f);
     addF(ParamId::CHAOS_VOL,     "Chaos Volume",  0.f, 1.f, 0.01f, 0.65f);
 
-    // Live Dub-Throw + Master Mono-Maker < 120 Hz + Bipolar DJ Isolator ("WASH")
+    // Live Dub-Throw + Spiral FX Drive + Master Mono-Maker < 120 Hz + Bipolar DJ Isolator ("WASH")
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{ ParamId::DUB_THROW, 1 }, "Dub Throw", false));
+    addF(ParamId::SPIRAL_DRIVE, "Spiral Drive", 0.f, 1.f, 0.01f, 0.35f);
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{ ParamId::MONO_SUB, 1 }, "Mono <120Hz", true));
     addF(ParamId::DJ_FILTER, "DJ Wash Filter", -1.f, 1.f, 0.005f, 0.0f);
+    addF(ParamId::MASTER_VOL, "Master Volume", 0.f, 1.25f, 0.005f, 1.0f);
 
     return layout;
 }

@@ -24,12 +24,16 @@ public:
         pitchSlowCoeff = static_cast<float>(std::exp(-1.0 / (0.060 * sr)));
         bodyLpAlpha = 1.0f - static_cast<float>(std::exp(-Dsp::TWO_PI * 8000.0 / sr));
         clickHpAlpha = 1.0f - static_cast<float>(std::exp(-Dsp::TWO_PI * 1500.0 / sr));
+        declickCoeff = static_cast<float>(std::exp(-1.0 / (0.0018 * sr)));
+        declickTail = lastOut = 0.0f;
     }
 
     void setParams(const Params& p) { params = p; }
 
     void trigger(float velocity = 1.0f)
     {
+        if (samplesRemaining > 0)
+            declickTail = std::clamp(declickTail + lastOut, -1.0f, 1.0f);
         vel = std::clamp(velocity, 0.0f, 1.0f);
         durationSamples  = static_cast<int>(sampleRate * params.decay * 3.0);
         samplesRemaining = durationSamples;
@@ -99,7 +103,13 @@ public:
 
         if (attackCounter < attackSamples)
             out *= static_cast<float>(attackCounter++) / static_cast<float>(attackSamples);
-
+        if (std::abs(declickTail) > 1.0e-5f)
+        {
+            out += declickTail;
+            declickTail *= declickCoeff;
+        }
+        else declickTail = 0.0f;
+        lastOut = out;
         return out;
     }
 
@@ -118,4 +128,5 @@ private:
     float    clickHpState = 0.0f, clickHpAlpha = 0.1f;
     NoiseGen noiseGen { 55555 };
     int      attackSamples = 22, attackCounter = 22;
+    float    declickCoeff = 0.985f, declickTail = 0.0f, lastOut = 0.0f;
 };

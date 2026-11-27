@@ -3,13 +3,15 @@
 #include "../core/MidiLearn.h"
 #include "MusicalUnits.h"
 
-// DJ & Live Performance rotary knob:
-// - Alt + Drag: Spring-Back Tweaking (snaps back to pre-drag value on mouseUp)
+// Elektron / FabFilter-grade DJ & Live Performance rotary knob:
+// - Cursor Lock (unbounded infinite drag without hitting screen edges)
+// - Bipolar 12-o'clock mode + Virtual Magnetic Center Detent (PAN / WASH)
+// - In-Place Label <-> Value readout support (no noisy floating JUCE popups!)
+// - Alt + Drag: Spring-Back Tweaking (snaps back on mouseUp)
 // - Shift + Drag: Surgical fine precision
-// - Double-Click: Reset to musical default (APVTS parameter defaultValue)
-// - Mouse Wheel: Instant micro-adjust without clicking
-// - Right-Click: 1-click MIDI Learn (Shift+Right-Click clears CC mapping)
-// - Real Engineering Units in popup & top CRT HUD + Ghost Dot + Live Mod Ring
+// - Double-Click: Smart musical default (APVTS defaultValue)
+// - Mouse Wheel: Instant micro-adjust
+// - Right-Click: 1-click MIDI Learn (Shift+R: clear CC)
 class DjKnob : public juce::Slider
 {
 public:
@@ -23,7 +25,7 @@ public:
         setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         setScrollWheelEnabled(true);
         setMouseDragSensitivity(150);
-        setPopupDisplayEnabled(true, false, nullptr);
+        setPopupDisplayEnabled(false, false, nullptr); // In-place Label <-> Value replaces floating popups!
 
         if (apvtsIn && paramId.isNotEmpty())
         {
@@ -37,8 +39,24 @@ public:
     }
 
     const juce::String& getParamId() const { return paramId; }
-
     void setHudLabel(const juce::String& lbl) { hudLabel = lbl; }
+
+    // Enable bipolar 12-o'clock LED arc + magnetic virtual center detent
+    void setBipolar(bool b)
+    {
+        bipolar = b;
+        getProperties().set("bipolar", b);
+        repaint();
+    }
+
+    bool isShowingValue() const { return isDraggingNow || isHoveredNow; }
+
+    juce::String getCompactValueText() const
+    {
+        if (paramId.isNotEmpty())
+            return MusicalUnits::formatCompact(paramId, getValue());
+        return juce::String(getValue(), 2);
+    }
 
     void setGhostNormalized(float norm01)
     {
@@ -54,6 +72,21 @@ public:
             getProperties().set("modOffset", offset);
             repaint();
         }
+    }
+
+    // Virtual Magnetic Center Detent (#14): gently snaps to center when dragging across neutral (unless Shift held)
+    double snapValue(double attemptedValue, DragMode dragMode) override
+    {
+        if (bipolar && dragMode == notDragging)
+            return attemptedValue;
+        if (bipolar && !juce::ModifierKeys::currentModifiers.isShiftDown())
+        {
+            const double center = 0.5 * (getMinimum() + getMaximum());
+            const double tol    = (getMaximum() - getMinimum()) * 0.035;
+            if (std::abs(attemptedValue - center) < tol)
+                return center;
+        }
+        return attemptedValue;
     }
 
     juce::String getTextFromValue(double value) override
@@ -79,16 +112,27 @@ public:
 
     void mouseEnter(const juce::MouseEvent& e) override
     {
+        isHoveredNow = true;
         juce::Slider::mouseEnter(e);
         if (paramId.isNotEmpty())
             MusicalUnits::publishHud(hudLabel.isNotEmpty() ? hudLabel : paramId, paramId, getValue());
+        if (auto* p = getParentComponent()) p->repaint();
+    }
+
+    void mouseExit(const juce::MouseEvent& e) override
+    {
+        isHoveredNow = false;
+        juce::Slider::mouseExit(e);
+        if (auto* p = getParentComponent()) p->repaint();
     }
 
     void valueChanged() override
     {
         juce::Slider::valueChanged();
-        if (isMouseOverOrDragging() && paramId.isNotEmpty())
+        if ((isMouseOverOrDragging() || isDraggingNow) && paramId.isNotEmpty())
             MusicalUnits::publishHud(hudLabel.isNotEmpty() ? hudLabel : paramId, paramId, getValue());
+        if (isDraggingNow)
+            if (auto* p = getParentComponent()) p->repaint();
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -106,6 +150,10 @@ public:
             return;
         }
 
+        isDraggingNow = true;
+        // Cursor Lock (#13): hide cursor & allow infinite drag without hitting screen edges
+        e.source.enableUnboundedMouseMovement(true, false);
+
         if (e.mods.isAltDown())
         {
             springActive = true;
@@ -118,9 +166,9 @@ public:
             springActive = false;
         }
 
-        // Surgical precision when Shift is held
         setMouseDragSensitivity(e.mods.isShiftDown() ? 650 : 150);
         juce::Slider::mouseDown(e);
+        if (auto* p = getParentComponent()) p->repaint();
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
@@ -133,6 +181,8 @@ public:
     void mouseUp(const juce::MouseEvent& e) override
     {
         if (e.mods.isRightButtonDown()) return;
+        e.source.enableUnboundedMouseMovement(false);
+        isDraggingNow = false;
         juce::Slider::mouseUp(e);
         if (springActive)
         {
@@ -142,22 +192,30 @@ public:
             repaint();
         }
         setMouseDragSensitivity(150);
+        if (auto* p = getParentComponent()) p->repaint();
     }
 
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
     {
         if (std::abs(wheel.deltaY) < 1.0e-5f) return;
-        const double step = (getMaximum() - getMinimum()) * (e.mods.isShiftDown() ? 0.005 : 0.025);
-        const double dir  = (wheel.deltaY > 0.0f) ? 1.0 : -1.0;
-        setValue(juce::jlimit(getMinimum(), getMaximum(), getValue() + dir * step), juce::sendNotificationSync);
+        // Step in normalized [0..1] proportion so logarithmic/skewed knobs (e.g. 303 Cutoff)
+        // move smoothly by equal musical intervals instead of jumping hundreds of Hz!
+        const double prop  = valueToProportionOfLength(getValue());
+        const double delta = (e.mods.isShiftDown() ? 0.005 : 0.025) * (wheel.deltaY > 0.0f ? 1.0 : -1.0);
+        const double next  = proportionOfLengthToValue(juce::jlimit(0.0, 1.0, prop + delta));
+        setValue(juce::jlimit(getMinimum(), getMaximum(), next), juce::sendNotificationSync);
         if (paramId.isNotEmpty())
             MusicalUnits::publishHud(hudLabel.isNotEmpty() ? hudLabel : paramId, paramId, getValue());
+        if (auto* p = getParentComponent()) p->repaint();
     }
 
 private:
     juce::String paramId;
     juce::String hudLabel;
     MidiLearnManager* midiLearn = nullptr;
+    bool   bipolar         = false;
+    bool   isHoveredNow    = false;
+    bool   isDraggingNow   = false;
     bool   springActive    = false;
     double springReturnVal = 0.0;
 };

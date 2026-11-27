@@ -29,6 +29,7 @@ OldSchoolBoxProcessor::OldSchoolBoxProcessor()
         sequencer.setPattern(ch, kDefaultPatterns[ch]);
 
     midiLearn.init(apvts);
+    voiceBank.setLfoBank(&beatLfo);
     for (int s = 0; s < Scenes::COUNT; ++s)
     {
         Scenes::capture(scenes[idx(s)], sequencer);
@@ -63,11 +64,29 @@ void OldSchoolBoxProcessor::prepareToPlay(double sampleRate, int)
     tightHpL = tightHpR = 0.0f;
     tightHpPrevL = tightHpPrevR = 0.0f;
 
-    // Master M/S Mono-Maker Side HPF @ 120 Hz (#24) + FX wet HPF @ 250 Hz (#27)
-    sideHpAlpha  = static_cast<float>(std::exp(-Dsp::TWO_PI * 120.0 / sampleRate));
-    sideHpState = sideHpPrev = 0.0f;
+    // Master 8 Hz DC Blocker + Linkwitz-Riley LR4 (24 dB/oct) Side HPF @ 120 Hz + Reverb/Delay HPFs
+    masterDcAlpha = static_cast<float>(std::exp(-Dsp::TWO_PI * 8.0 / sampleRate));
+    masterDcPrevL = masterDcOutL = masterDcPrevR = masterDcOutR = 0.0f;
+    {
+        // Butterworth 2nd-order HPF @ 120 Hz (Q = 0.70710678); cascaded twice = true LR4 (24 dB/oct)!
+        const double w0 = Dsp::TWO_PI * 120.0 / sampleRate;
+        const double cosW = std::cos(w0);
+        const double alpha = std::sin(w0) / std::sqrt(2.0);
+        const double a0 = 1.0 + alpha;
+        lr4B0 = static_cast<float>(((1.0 + cosW) * 0.5) / a0);
+        lr4B1 = static_cast<float>((-(1.0 + cosW)) / a0);
+        lr4B2 = lr4B0;
+        lr4A1 = static_cast<float>((-2.0 * cosW) / a0);
+        lr4A2 = static_cast<float>((1.0 - alpha) / a0);
+        sideLr4A = {};
+        sideLr4B = {};
+    }
     fxWetHpAlpha = static_cast<float>(std::exp(-Dsp::TWO_PI * 250.0 / sampleRate));
-    delWetHpL = delWetHpR = delWetPrevL = delWetPrevR = 0.0f;
+    delHpAlpha   = static_cast<float>(std::exp(-Dsp::TWO_PI * 300.0 / sampleRate));
+    delLpAlpha   = 1.0f - static_cast<float>(std::exp(-Dsp::TWO_PI * 6000.0 / sampleRate));
+    delHp1L = delHp1PrevL = delHp2L = delHp2PrevL = 0.0f;
+    delHp1R = delHp1PrevR = delHp2R = delHp2PrevR = 0.0f;
+    delLpL  = delLpR      = 0.0f;
     revWetHpL = revWetHpR = revWetPrevL = revWetPrevR = 0.0f;
 
     // Parameter smoothing (~10 ms) (#28)
@@ -78,7 +97,9 @@ void OldSchoolBoxProcessor::prepareToPlay(double sampleRate, int)
     smCompAmt   = apvts.getRawParameterValue(ParamId::COMP_AMOUNT)->load();
     smDjFilter  = apvts.getRawParameterValue(ParamId::DJ_FILTER)->load();
     djSvfL = {}; djSvfR = {};
-    killHpAlpha = static_cast<float>(std::exp(-Dsp::TWO_PI * 150.0 / sampleRate));
+    killHpAlpha   = static_cast<float>(std::exp(-Dsp::TWO_PI * 120.0 / sampleRate));
+    killFadeAlpha = 1.0f - static_cast<float>(std::exp(-1.0 / (0.012 * sampleRate))); // 12 ms clickless crossfade
+    smKillSub     = 0.0f;
     killHp1L = killHp1PrevL = killHp2L = killHp2PrevL = 0.0f;
     killHp1R = killHp1PrevR = killHp2R = killHp2PrevR = 0.0f;
     for (int ch = 0; ch < OsbBus::COUNT; ++ch)
@@ -89,6 +110,7 @@ void OldSchoolBoxProcessor::prepareToPlay(double sampleRate, int)
 
     voiceBank.prepare(sampleRate);
     chaosBus.prepare(sampleRate);
+    spiralFx.prepare(sampleRate);
     plateReverb.prepare(sampleRate);
     masterDrive.prepare(sampleRate);
     glueComp.prepare(sampleRate);
@@ -168,12 +190,27 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const int prevKickStep = lastSteps[0];
 
     juce::MidiBuffer outMidi;
+    TransportSync::EventQueue subBlockEvents;
     TransportSync::process(getPlayHead(), sequencer, voiceBank, lastSteps, prevBar, swing,
                             scenes.data(), preFillSnapshot, audioRng,
                             midiOut ? &outMidi : nullptr, pendingMidiNotes,
                             visualState,
                             autoEnabled ? &autoMode : nullptr, autoMut, autoDr,
-                            intPlay, internalPpq, activeBpm, currentSampleRate, buffer.getNumSamples());
+                            intPlay, internalPpq, activeBpm, currentSampleRate, buffer.getNumSamples(),
+                            &subBlockEvents);
+
+    // Update Beat-Synced 32-Bar LFO Bank deterministically from host PPQ or internal clock
+    double activePpq = internalPpq;
+    {
+        if (isHostPlaying)
+        {
+            if (auto* ph = getPlayHead())
+                if (auto pos = ph->getPosition())
+                    if (auto ppq = pos->getPpqPosition())
+                        activePpq = *ppq;
+        }
+        beatLfo.update(activePpq);
+    }
 
     // Drive Chaos Sample Bus on every 16th-note step boundary when enabled
     if (chaosOn && sequencer.isPlaying.load(std::memory_order_acquire) && lastSteps[0] != prevKickStep && lastSteps[0] >= 0)
@@ -195,9 +232,16 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
     else
     {
-        // MIDI out disabled — ensure any pending notes get a final note-off
+        // MIDI out disabled — flush final NoteOff for any pending notes so DAW never gets stuck notes!
         for (int ch = 0; ch < Sequencer::NUM_CHANNELS; ++ch)
-            pendingMidiNotes[idx(ch)] = -1;
+        {
+            if (pendingMidiNotes[idx(ch)] >= 0)
+            {
+                const int midiCh = (ch >= OsbBus::BASS1) ? (MidiMap::BASS1_CH + (ch - OsbBus::BASS1)) : 10;
+                midi.addEvent(juce::MidiMessage::noteOff(midiCh, pendingMidiNotes[idx(ch)]), 0);
+                pendingMidiNotes[idx(ch)] = -1;
+            }
+        }
     }
 
     const int numSamples = buffer.getNumSamples();
@@ -210,9 +254,10 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const float reverbSize   = apvts.getRawParameterValue(ParamId::REVERB_SIZE)->load();
     const float reverbMix    = apvts.getRawParameterValue(ParamId::REVERB_MIX)->load();
     const float compAmt      = apvts.getRawParameterValue(ParamId::COMP_AMOUNT)->load();
+    const float spiralDrive  = apvts.getRawParameterValue(ParamId::SPIRAL_DRIVE)->load();
     const bool  tightMode    = apvts.getRawParameterValue(ParamId::TIGHT)->load() > 0.5f;
 
-    plateReverb.setParams(reverbSize, 0.30f);
+    plateReverb.setParams(tightMode ? (reverbSize * 0.72f) : reverbSize, 0.30f);
     glueComp.setAmount(compAmt);
 
     // Pick crossover alpha based on TIGHT toggle
@@ -243,12 +288,32 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     auto* mainR = mainBus.getWritePointer(1);
 
     // BUG FIX: process in chunks to handle buffers > STACK_MAX (offline bounce)
+    analyzer.beginBlock(numSamples);
+    chaosBus.consumeManualTrigger(chaosBank);
+
     constexpr int STACK_MAX = 2048;
     float tmpL[STACK_MAX], tmpR[STACK_MAX];
+    float spiralInL[STACK_MAX], spiralInR[STACK_MAX];
 
-    for (int offset = 0; offset < numSamples; offset += STACK_MAX)
+    // True 1-sample-accurate sub-block splitting: split audio rendering at every scheduled
+    // sequencer event's exact sampleOffset (identical timing at 32 or 2048 samples!)
+    int nextEventIdx = 0;
+    for (int offset = 0; offset < numSamples; )
     {
-    const int blockSize = std::min(numSamples - offset, STACK_MAX);
+    while (nextEventIdx < subBlockEvents.count
+           && subBlockEvents.events[static_cast<size_t>(nextEventIdx)].sampleOffset <= offset)
+    {
+        TransportSync::dispatchEvent(voiceBank, subBlockEvents.events[static_cast<size_t>(nextEventIdx)]);
+        ++nextEventIdx;
+    }
+
+    int nextSplit = std::min(numSamples, offset + STACK_MAX);
+    if (nextEventIdx < subBlockEvents.count)
+        nextSplit = std::min(nextSplit, subBlockEvents.events[static_cast<size_t>(nextEventIdx)].sampleOffset);
+
+    const int blockSize = std::max(1, nextSplit - offset);
+    std::memset(spiralInL, 0, static_cast<size_t>(blockSize) * sizeof(float));
+    std::memset(spiralInR, 0, static_cast<size_t>(blockSize) * sizeof(float));
 
     for (int voice = 0; voice < OsbBus::COUNT; ++voice)
     {
@@ -284,6 +349,7 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             tmpL[i] = s * panL;
             tmpR[i] = s * panR;
         }
+        analyzer.feedVoiceBlock(voice, tmpL, tmpR, blockSize);
 
         // ── Per-voice mono crossover (TIGHT toggle → tighter @ 150Hz) ──
         {
@@ -322,11 +388,17 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             }
         }
 
-        // ── Sum into main output ──
+        // ── Sum into main output (+ tap PERC 1 & PERC 2 into Spiral FX send) ──
+        const bool toSpiral = (voice == OsbBus::PERC1 || voice == OsbBus::PERC2);
         for (int i = 0; i < blockSize; ++i)
         {
             mainL[offset + i] += tmpL[i];
             mainR[offset + i] += tmpR[i];
+            if (toSpiral)
+            {
+                spiralInL[i] += tmpL[i];
+                spiralInR[i] += tmpR[i];
+            }
         }
     }
 
@@ -345,58 +417,103 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     for (int i = 0; i < blockSize; ++i)
         fxDuckBuf[i] = voiceBank.tickFxDuck();
 
-    // ── Underground Chaos Sample Bus (mixed into master pre-FX, ducked by Kick #11-#22) ──
-    if (chaosOn && chaosVol > 0.001f)
+    // ── Underground Chaos Sample Bus (mixed into master pre-FX, ducked by Kick + tapped to Spiral FX) ──
+    if ((chaosOn || chaosBus.isPlaying()) && chaosVol > 0.001f)
     {
         for (int i = 0; i < blockSize; ++i)
         {
             float cL = 0.0f, cR = 0.0f;
             chaosBus.process(cL, cR, chaosGrit, chaosVol, fxDuckBuf[i]);
+            analyzer.feedChaosSample(cL, cR);
             mainL[offset + i] += cL;
             mainR[offset + i] += cR;
+            spiralInL[i] += cL;
+            spiralInR[i] += cR;
         }
     }
 
-    // ── Master Delay (stereo, click-free, wet HPF @ 250 Hz + kick ducked + Dub-Throw #18/#27/#28) ──
+    // ── Spiral FX (Jet Flanger + 3/16 Gated Decaying Dub Delay + Distortion for Percs & Samples) ──
+    {
+        const double chunkPpq = activePpq + (static_cast<double>(offset) * static_cast<double>(activeBpm)) / (60.0 * currentSampleRate);
+        spiralFx.process(spiralInL, spiralInR, mainL + offset, mainR + offset, fxDuckBuf,
+                         blockSize, activeBpm, chunkPpq, spiralDrive);
+    }
+
+    // ── Master Delay (4-pt Hermite Cubic tape delay + authentic Dub Throw send gate + 300 Hz HPF) ──
     const bool  throwActive   = dubThrowUi || autoDubThrow;
-    const float effDelayMix   = throwActive ? std::max(delayMix, 0.62f) : delayMix;
-    const float effDelayFb    = throwActive ? std::max(delayFb,  0.82f) : delayFb;
-    if (effDelayMix > 0.001f || smDelayMix > 0.001f)
+    const float baseDelayFb   = tightMode ? (delayFb * 0.75f) : delayFb;
+    const bool  delayNeeded   = throwActive || delayMix > 0.001f || smDelayMix > 0.001f
+                             || delay.throwSendEnv > 0.001f || delay.tailEnergy > 0.0015f;
+    if (delayNeeded)
     {
         auto& dl = delay;
         const float targetDelay = static_cast<float>(delaySamples);
-        const float smoothCoeff = 1.0f - std::exp(-1.0f / (0.005f * static_cast<float>(currentSampleRate)));
+        const float smoothCoeff = 1.0f - std::exp(-1.0f / (0.055f * static_cast<float>(currentSampleRate))); // 55 ms tape glide
+        const float throwAlpha  = 1.0f - std::exp(-1.0f / (0.005f * static_cast<float>(currentSampleRate))); // 5 ms send gate
+        const float effDelayFb  = (throwActive || dl.tailEnergy > 0.0015f) ? std::max(baseDelayFb, 0.78f) : baseDelayFb;
+        const float targetWet   = (throwActive || dl.tailEnergy > 0.0015f) ? std::max(delayMix, 0.58f) : delayMix;
 
+        auto readHermite = [](const std::vector<float>& buf, int wPos, int sz, float del) -> float {
+            const int di = static_cast<int>(del);
+            const float f = del - static_cast<float>(di);
+            const int i0 = (wPos - di + 1 + sz) % sz;
+            const int i1 = (wPos - di     + sz) % sz;
+            const int i2 = (wPos - di - 1 + sz) % sz;
+            const int i3 = (wPos - di - 2 + sz) % sz;
+            const float y0 = buf[static_cast<size_t>(i0)];
+            const float y1 = buf[static_cast<size_t>(i1)];
+            const float y2 = buf[static_cast<size_t>(i2)];
+            const float y3 = buf[static_cast<size_t>(i3)];
+            const float c0 = y1;
+            const float c1 = 0.5f * (y2 - y0);
+            const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+            const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+            return ((c3 * f + c2) * f + c1) * f + c0;
+        };
+
+        float blockTailPeak = 0.0f;
         for (int i = 0; i < blockSize; ++i)
         {
-            smDelayMix += paramSmoothAlpha * (effDelayMix - smDelayMix);
+            smDelayMix += paramSmoothAlpha * (targetWet - smDelayMix);
+            dl.throwSendEnv += throwAlpha * ((throwActive ? 1.0f : 0.0f) - dl.throwSendEnv);
             dl.smoothedDelay += smoothCoeff * (targetDelay - dl.smoothedDelay);
-            const float readDelay = std::max(1.0f, std::min(dl.smoothedDelay,
-                                    static_cast<float>(dl.size - 2)));
+            const float readDelay = std::max(2.0f, std::min(dl.smoothedDelay,
+                                    static_cast<float>(dl.size - 3)));
 
-            const int readInt = static_cast<int>(readDelay);
-            const float frac  = readDelay - static_cast<float>(readInt);
-            const int r0 = (dl.writePos - readInt + dl.size) % dl.size;
-            const int r1 = (r0 - 1 + dl.size) % dl.size;
+            const float dL = readHermite(dl.bufL, dl.writePos, dl.size, readDelay);
+            const float dR = readHermite(dl.bufR, dl.writePos, dl.size, readDelay);
 
-            const float dL = dl.bufL[static_cast<size_t>(r0)] * (1.0f - frac)
-                           + dl.bufL[static_cast<size_t>(r1)] * frac;
-            const float dR = dl.bufR[static_cast<size_t>(r0)] * (1.0f - frac)
-                           + dl.bufR[static_cast<size_t>(r1)] * frac;
+            // Authentic Dub Console send gate: when DUB THROW is released, input send closes smoothly
+            // (if base delayMix == 0) while existing echoes keep decaying freely on the beat!
+            const float inSend = (delayMix > 0.001f) ? 1.0f : dl.throwSendEnv;
+            const float sendL = mainL[offset + i] * inSend + dL * effDelayFb;
+            const float sendR = mainR[offset + i] * inSend + dR * effDelayFb;
 
-            dl.bufL[static_cast<size_t>(dl.writePos)] = mainL[offset + i] + dL * effDelayFb;
-            dl.bufR[static_cast<size_t>(dl.writePos)] = mainR[offset + i] + dR * effDelayFb;
+            delHp1L = delHpAlpha * (delHp1L + sendL - delHp1PrevL); delHp1PrevL = sendL;
+            delHp2L = delHpAlpha * (delHp2L + delHp1L - delHp2PrevL); delHp2PrevL = delHp1L;
+            delHp1R = delHpAlpha * (delHp1R + sendR - delHp1PrevR); delHp1PrevR = sendR;
+            delHp2R = delHpAlpha * (delHp2R + delHp1R - delHp2PrevR); delHp2PrevR = delHp1R;
 
-            // HPF @ 250 Hz on wet return so delay never muddies sub-bass + duck on kick
-            delWetHpL = fxWetHpAlpha * (delWetHpL + dL - delWetPrevL); delWetPrevL = dL;
-            delWetHpR = fxWetHpAlpha * (delWetHpR + dR - delWetPrevR); delWetPrevR = dR;
+            // Gentle 6 kHz analog-style damping inside feedback loop (NaN/Inf protected)
+            delLpL += delLpAlpha * (delHp2L - delLpL);
+            delLpR += delLpAlpha * (delHp2R - delLpR);
+            if (!std::isfinite(delLpL)) delLpL = 0.0f;
+            if (!std::isfinite(delLpR)) delLpR = 0.0f;
 
-            const float wetAmt = smDelayMix * fxDuckBuf[i];
-            mainL[offset + i] += delWetHpL * wetAmt;
-            mainR[offset + i] += delWetHpR * wetAmt;
+            dl.bufL[static_cast<size_t>(dl.writePos)] = std::clamp(delLpL, -3.5f, 3.5f);
+            dl.bufR[static_cast<size_t>(dl.writePos)] = std::clamp(delLpR, -3.5f, 3.5f);
 
+            // Balanced mono-leaning wet return (mid + 30% side) — rock-solid phase & club-safe
+            const float wetMid  = 0.5f * (dL + dR);
+            const float wetSide = 0.5f * (dL - dR) * 0.30f;
+            const float wetAmt  = smDelayMix * fxDuckBuf[i] * 0.85f;
+            mainL[offset + i] += (wetMid + wetSide) * wetAmt;
+            mainR[offset + i] += (wetMid - wetSide) * wetAmt;
+
+            blockTailPeak = std::max(blockTailPeak, std::max(std::abs(dL), std::abs(dR)));
             dl.writePos = (dl.writePos + 1) % dl.size;
         }
+        dl.tailEnergy = blockTailPeak;
     }
 
     // ── Master Reverb (Freeverb plate, wet HPF @ 250 Hz + kick ducked #27/#28) ──
@@ -416,6 +533,19 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         }
     }
 
+    // ── Master 8 Hz DC Blocker (removes any accumulated DC bias before Glue/Phase/Limiter) ──
+    for (int i = 0; i < blockSize; ++i)
+    {
+        const float xL = mainL[offset + i];
+        const float xR = mainR[offset + i];
+        masterDcOutL = (xL - masterDcPrevL) + masterDcAlpha * masterDcOutL;
+        masterDcPrevL = xL;
+        masterDcOutR = (xR - masterDcPrevR) + masterDcAlpha * masterDcOutR;
+        masterDcPrevR = xR;
+        mainL[offset + i] = masterDcOutL;
+        mainR[offset + i] = masterDcOutR;
+    }
+
     // ── Master Glue Compressor ──
     if (compAmt > 0.001f || smCompAmt > 0.001f)
     {
@@ -423,19 +553,29 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         glueComp.setAmount(std::clamp(smCompAmt, 0.0f, 1.0f));
         for (int i = 0; i < blockSize; ++i)
             glueComp.process(mainL[offset + i], mainR[offset + i]);
+        analyzer.setCompGrDb(glueComp.getGainReductionDb());
+    }
+    else
+    {
+        analyzer.setCompGrDb(0.0f);
     }
 
-    // ── Master Elliptical M/S Mono-Maker (< 120 Hz mono on Side channel only, #24) ──
+    // ── Master Linkwitz-Riley LR4 (24 dB/oct) Elliptical M/S Mono-Maker (< 120 Hz Side HPF) ──
     if (monoSubOn)
     {
+        auto runBiquad = [&](float x, BiquadState& st) -> float {
+            const float y = lr4B0 * x + st.z1;
+            st.z1 = lr4B1 * x - lr4A1 * y + st.z2;
+            st.z2 = lr4B2 * x - lr4A2 * y;
+            return y;
+        };
         for (int i = 0; i < blockSize; ++i)
         {
             const float mid  = 0.5f * (mainL[offset + i] + mainR[offset + i]);
             const float side = 0.5f * (mainL[offset + i] - mainR[offset + i]);
-            sideHpState = sideHpAlpha * (sideHpState + side - sideHpPrev);
-            sideHpPrev  = side;
-            mainL[offset + i] = mid + sideHpState;
-            mainR[offset + i] = mid - sideHpState;
+            const float sideLr4 = runBiquad(runBiquad(side, sideLr4A), sideLr4B);
+            mainL[offset + i] = mid + sideLr4;
+            mainR[offset + i] = mid - sideLr4;
         }
     }
 
@@ -494,33 +634,53 @@ void OldSchoolBoxProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             }
         }
     }
-    if (killSub)
+    if (killSub || smKillSub > 0.0005f)
     {
+        const float targetKill = killSub ? 1.0f : 0.0f;
         for (int i = 0; i < blockSize; ++i)
         {
+            smKillSub += killFadeAlpha * (targetKill - smKillSub);
             const float xL = mainL[offset + i];
             const float xR = mainR[offset + i];
             killHp1L = killHpAlpha * (killHp1L + xL - killHp1PrevL); killHp1PrevL = xL;
             killHp2L = killHpAlpha * (killHp2L + killHp1L - killHp2PrevL); killHp2PrevL = killHp1L;
             killHp1R = killHpAlpha * (killHp1R + xR - killHp1PrevR); killHp1PrevR = xR;
             killHp2R = killHpAlpha * (killHp2R + killHp1R - killHp2PrevR); killHp2PrevR = killHp1R;
-            mainL[offset + i] = killHp2L;
-            mainR[offset + i] = killHp2R;
+            mainL[offset + i] = xL * (1.0f - smKillSub) + killHp2L * smKillSub;
+            mainR[offset + i] = xR * (1.0f - smKillSub) + killHp2R * smKillSub;
         }
     }
 
-    // ── Master peak-following limiter + analyzer tap ──
+    // ── Master output fader + peak-following limiter + NaN/Inf sanitization + analyzer tap ──
+    const float masterVolTarget = apvts.getRawParameterValue(ParamId::MASTER_VOL)->load();
     bool clippedThisBlock = false;
     for (int i = 0; i < blockSize; ++i)
     {
-        if (std::abs(mainL[offset + i]) > 0.90f || std::abs(mainR[offset + i]) > 0.90f)
+        smMasterVol += paramSmoothAlpha * (masterVolTarget - smMasterVol);
+        float& sL = mainL[offset + i];
+        float& sR = mainR[offset + i];
+        sL *= smMasterVol;
+        sR *= smMasterVol;
+        if (!std::isfinite(sL)) sL = 0.0f;
+        if (!std::isfinite(sR)) sR = 0.0f;
+        if (std::abs(sL) > 0.90f || std::abs(sR) > 0.90f)
             clippedThisBlock = true;
-        masterLimiter.process(mainL[offset + i], mainR[offset + i]);
-        analyzer.process(mainL[offset + i], mainR[offset + i]);
+        masterLimiter.process(sL, sR);
+        sL = std::isfinite(sL) ? std::clamp(sL, -1.0f, 1.0f) : 0.0f;
+        sR = std::isfinite(sR) ? std::clamp(sR, -1.0f, 1.0f) : 0.0f;
+        analyzer.process(sL, sR);
     }
     masterClipping.store(clippedThisBlock || masterLimiter.getGainReductionDb() > 0.5f, std::memory_order_relaxed);
 
+    offset += blockSize;
     } // end offset loop
+
+    // Dispatch any remaining events scheduled at the exact buffer end
+    while (nextEventIdx < subBlockEvents.count)
+    {
+        TransportSync::dispatchEvent(voiceBank, subBlockEvents.events[static_cast<size_t>(nextEventIdx)]);
+        ++nextEventIdx;
+    }
 
     analyzer.publish();  // commit meter/spectrum snapshots once per buffer
 }

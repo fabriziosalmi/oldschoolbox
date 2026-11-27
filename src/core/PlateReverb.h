@@ -40,11 +40,13 @@ public:
         for (auto& a : allpassR) { a.buf.fill(0); a.idx = 0; }
     }
 
-    // size: 0..1 (room size — feedback). damp: 0..1 (HF damping).
+    // size: 0..1 (room size — feedback). damp: 0..1 (HF damping, sample-rate invariant!).
     void setParams(float size, float damp)
     {
         roomFeedback = 0.70f + size * 0.27f;     // 0.70 .. 0.97
-        damping       = 0.10f + damp * 0.40f;     // 0.10 .. 0.50
+        const float baseDamp = 0.10f + damp * 0.40f; // 0.10 .. 0.50 @ 44.1 kHz
+        // Scale 1-pole damping coefficient by 44100/sr so reverb tone is identical at 44.1..192 kHz!
+        damping = std::pow(baseDamp, static_cast<float>(44100.0 / std::max(8000.0, sampleRate)));
     }
 
     // Process one stereo sample. Returns wet signal (caller mixes with dry).

@@ -32,7 +32,7 @@ struct ParamKnobGroup
         e.knob  = std::make_unique<DjKnob>(paramId, &apvts, midiLearn, hudName);
         e.knob->setTooltip(hudName + "  (Alt+drag: spring-back | Shift+drag: fine | Right-click: MIDI Learn)");
         e.knob->setColour(juce::Slider::rotarySliderFillColourId, accentColour);
-        e.knob->setPopupDisplayEnabled(true, false, &parent);
+        e.knob->setPopupDisplayEnabled(false, false, nullptr);
         e.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, paramId, *e.knob);
         parent.addAndMakeVisible(*e.knob);

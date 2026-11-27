@@ -117,57 +117,89 @@ namespace LoopExporter
         juce::AudioBuffer<float> outBuf(2, totalSamples);
         outBuf.clear();
 
+        // 2-Pass Seamless Loop Wrap-Around: pass 0 warms up voice/decay tails so bar 1
+        // starts with natural wrapped tails, and pass 1 is written to the 24-bit WAV!
         juce::AudioBuffer<float> scratch(2, blockSize);
         float tmpL[blockSize], tmpR[blockSize];
-        int pos = 0;
-        while (pos < totalSamples)
+        for (int pass = 0; pass < 2; ++pass)
         {
-            const int n = std::min(blockSize, totalSamples - pos);
-            TransportSync::process(nullptr, seq, voices, lastSteps, prevBar, swing,
-                                   dummyScenes.data(), snap, rng, nullptr, pendingMidi,
-                                   vis, nullptr, 0.0f, 0.0f,
-                                   true, ppq, static_cast<float>(safeBpm), sr, n);
+            int pos = 0;
+            while (pos < totalSamples)
+            {
+                const int n = std::min(blockSize, totalSamples - pos);
+                TransportSync::EventQueue evQ;
+                TransportSync::process(nullptr, seq, voices, lastSteps, prevBar, swing,
+                                       dummyScenes.data(), snap, rng, nullptr, pendingMidi,
+                                       vis, nullptr, 0.0f, 0.0f,
+                                       true, ppq, static_cast<float>(safeBpm), sr, n, &evQ);
 
-            scratch.clear();
-            float* outL = scratch.getWritePointer(0);
-            float* outR = scratch.getWritePointer(1);
-            for (int b = 0; b < OsbBus::COUNT; ++b)
-            {
-                if (!seq.isChannelAudible(b)) continue;
-                std::memset(tmpL, 0, static_cast<size_t>(n) * sizeof(float));
-                std::memset(tmpR, 0, static_cast<size_t>(n) * sizeof(float));
-                voices.renderBus(b, tmpL, tmpR, n, vol[static_cast<size_t>(b)]);
-                const float p = pan[static_cast<size_t>(b)];
-                const float gL = 1.0f - std::max(0.0f, p);
-                const float gR = 1.0f + std::min(0.0f, p);
-                for (int i = 0; i < n; ++i)
+                scratch.clear();
+                float* outL = scratch.getWritePointer(0);
+                float* outR = scratch.getWritePointer(1);
+
+                int nextEv = 0;
+                for (int off = 0; off < n; )
                 {
-                    outL[i] += tmpL[i] * gL;
-                    outR[i] += tmpL[i] * gR;
+                    while (nextEv < evQ.count && evQ.events[static_cast<size_t>(nextEv)].sampleOffset <= off)
+                    {
+                        TransportSync::dispatchEvent(voices, evQ.events[static_cast<size_t>(nextEv)]);
+                        ++nextEv;
+                    }
+                    int split = n;
+                    if (nextEv < evQ.count)
+                        split = std::min(split, evQ.events[static_cast<size_t>(nextEv)].sampleOffset);
+                    const int subN = std::max(1, split - off);
+
+                    for (int b = 0; b < OsbBus::COUNT; ++b)
+                    {
+                        if (!seq.isChannelAudible(b)) continue;
+                        std::memset(tmpL, 0, static_cast<size_t>(subN) * sizeof(float));
+                        std::memset(tmpR, 0, static_cast<size_t>(subN) * sizeof(float));
+                        voices.renderBus(b, tmpL, tmpR, subN, vol[static_cast<size_t>(b)]);
+                        // Equal-Power -3 dB Pan Law (p in 0..1, 0.5 = centre)
+                        const float p  = std::clamp(pan[static_cast<size_t>(b)], 0.0f, 1.0f);
+                        const float gL = std::sin((1.0f - p) * Dsp::HALF_PI_F);
+                        const float gR = std::sin(p * Dsp::HALF_PI_F);
+                        for (int i = 0; i < subN; ++i)
+                        {
+                            outL[off + i] += tmpL[i] * gL;
+                            outR[off + i] += tmpL[i] * gR;
+                        }
+                    }
+                    off += subN;
                 }
+                while (nextEv < evQ.count)
+                {
+                    TransportSync::dispatchEvent(voices, evQ.events[static_cast<size_t>(nextEv)]);
+                    ++nextEv;
+                }
+
+                if (pass == 1)
+                {
+                    for (int i = 0; i < n; ++i)
+                    {
+                        outL[i] = std::tanh(outL[i]);
+                        outR[i] = std::tanh(outR[i]);
+                    }
+                    outBuf.copyFrom(0, pos, scratch, 0, 0, n);
+                    outBuf.copyFrom(1, pos, scratch, 1, 0, n);
+                }
+                pos += n;
             }
-            for (int i = 0; i < n; ++i)
-            {
-                outL[i] = std::tanh(outL[i]);
-                outR[i] = std::tanh(outR[i]);
-            }
-            outBuf.copyFrom(0, pos, scratch, 0, 0, n);
-            outBuf.copyFrom(1, pos, scratch, 1, 0, n);
-            pos += n;
         }
 
         const auto outFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                  .getChildFile("OldSchoolBox_4bar_" + juce::String(static_cast<int>(std::round(safeBpm))) + "bpm.wav");
         outFile.deleteFile();
         juce::WavAudioFormat wav;
-        if (auto stream = outFile.createOutputStream())
+        if (auto stream = std::unique_ptr<juce::OutputStream>(outFile.createOutputStream()))
         {
-            if (auto writer = std::unique_ptr<juce::AudioFormatWriter>(
-                    wav.createWriterFor(stream.get(), sr, 2, 24, {}, 0)))
-            {
-                stream.release(); // writer now owns stream
+            const auto opts = juce::AudioFormatWriterOptions{}
+                                  .withSampleRate(sr)
+                                  .withNumChannels(2)
+                                  .withBitsPerSample(24);
+            if (auto writer = wav.createWriterFor(stream, opts))
                 writer->writeFromAudioSampleBuffer(outBuf, 0, totalSamples);
-            }
         }
         return outFile;
     }

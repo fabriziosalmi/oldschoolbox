@@ -22,6 +22,57 @@
 // auto-variation. RNG is used for probability gating and humanise.
 struct TransportSync
 {
+    // Sample-accurate scheduled voice event for zero-allocation sub-block splitting
+    struct ScheduledEvent
+    {
+        enum class Type : uint8_t { DrumTrigger, BassTrigger, BassNoteOff };
+        int   sampleOffset = 0;
+        int   ch           = 0;
+        Type  type         = Type::DrumTrigger;
+        float vel          = 1.0f;
+        int   note         = 48;
+        bool  slide        = false;
+        bool  accent       = false;
+    };
+
+    struct EventQueue
+    {
+        static constexpr int MAX_EVENTS = 64;
+        std::array<ScheduledEvent, MAX_EVENTS> events {};
+        int count = 0;
+
+        void push(const ScheduledEvent& ev)
+        {
+            if (count < MAX_EVENTS)
+                events[static_cast<std::size_t>(count++)] = ev;
+        }
+
+        void sortByOffset()
+        {
+            if (count <= 1) return;
+            std::stable_sort(events.begin(), events.begin() + count,
+                [](const ScheduledEvent& a, const ScheduledEvent& b) {
+                    return a.sampleOffset < b.sampleOffset;
+                });
+        }
+    };
+
+    static void dispatchEvent(VoiceBank& voices, const ScheduledEvent& ev)
+    {
+        switch (ev.type)
+        {
+            case ScheduledEvent::Type::DrumTrigger:
+                voices.trigger(ev.ch, ev.vel);
+                break;
+            case ScheduledEvent::Type::BassTrigger:
+                voices.triggerBass303(ev.ch - OsbBus::BASS1, ev.note, ev.vel, ev.slide, ev.accent);
+                break;
+            case ScheduledEvent::Type::BassNoteOff:
+                voices.noteOffBass(ev.ch - OsbBus::BASS1);
+                break;
+        }
+    }
+
     static void process(juce::AudioPlayHead* playHead,
                         Sequencer&           seq,
                         VoiceBank&           voices,
@@ -41,7 +92,8 @@ struct TransportSync
                         double&              internalPpq = dummyInternalPpq(),
                         float                internalBpm = 120.0f,
                         double               sampleRate = 44100.0,
-                        int                  numSamples = 0)
+                        int                  numSamples = 0,
+                        EventQueue*          deferredEvents = nullptr)
     {
         bool hostPlaying = false;
         double ppq = 0.0;
@@ -267,12 +319,18 @@ struct TransportSync
                             if (seq.getBassOctDown(bi, localStep))  note -= 12;
                             if (accent)
                                 vel = std::min(1.0f, vel + 0.35f);
-                            voices.triggerBass303(bi, note, vel, slide, accent);
+                            if (deferredEvents != nullptr)
+                                deferredEvents->push({ sampleOffset, ch, ScheduledEvent::Type::BassTrigger, vel, note, slide, accent });
+                            else
+                                voices.triggerBass303(bi, note, vel, slide, accent);
                             midiNote = note;
                         }
                         else
                         {
-                            voices.trigger(ch, vel);
+                            if (deferredEvents != nullptr)
+                                deferredEvents->push({ sampleOffset, ch, ScheduledEvent::Type::DrumTrigger, vel, 0, false, false });
+                            else
+                                voices.trigger(ch, vel);
                             midiNote = midiNoteForDrum(ch);
                         }
 
@@ -297,15 +355,27 @@ struct TransportSync
                 else if (ch >= OsbBus::BASS1)
                 {
                     const int bi = ch - OsbBus::BASS1;
-                    if (voices.isActive(ch))
+                    const int prevLocal = (localStep == 0) ? (len - 1) : (localStep - 1);
+                    if (!seq.getBassSlide(bi, prevLocal))
                     {
-                        const int prevLocal = (localStep == 0) ? (len - 1) : (localStep - 1);
-                        if (!seq.getBassSlide(bi, prevLocal))
+                        if (deferredEvents != nullptr)
+                            deferredEvents->push({ sampleOffset, ch, ScheduledEvent::Type::BassNoteOff, 0.0f, 0, false, false });
+                        else if (voices.isActive(ch))
                             voices.noteOffBass(bi);
+
+                        // Anti-Stuck-Notes: emit sample-accurate MIDI NoteOff on non-slid bass off-steps
+                        if (outMidi && pendingMidiNotes[idx(ch)] >= 0)
+                        {
+                            outMidi->addEvent(juce::MidiMessage::noteOff(midiChForChannel(ch),
+                                              pendingMidiNotes[idx(ch)]), sampleOffset);
+                            pendingMidiNotes[idx(ch)] = -1;
+                        }
                     }
                 }
             }
         }
+        if (deferredEvents != nullptr)
+            deferredEvents->sortByOffset();
     }
 
 private:

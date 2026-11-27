@@ -77,6 +77,12 @@ namespace MusicalUnits
         }
 
         // Volume -> dB
+        if (paramId == ParamId::MASTER_VOL)
+        {
+            if (val <= 0.001) return "-inf dB";
+            const double db = 20.0 * std::log10(val);
+            return (db >= 0.0 ? "+" : "") + juce::String(db, 1) + " dB";
+        }
         if (paramId.startsWith("vol_") || paramId == ParamId::CHAOS_VOL)
         {
             if (val <= 0.001) return "-inf dB";
@@ -99,11 +105,43 @@ namespace MusicalUnits
         return juce::String(val, 2);
     }
 
-    // Shared atomic-like HUD notification hook (UI thread only) so hovering/dragging any DjKnob
-    // displays its live engineering readout inside the top CRT Marquee terminal.
+    // Compact value+unit formatter for in-place knob labels (e.g. "55 Hz", "320 ms", "+4.2 dB", "C")
+    inline juce::String formatCompact(const juce::String& paramId, double val)
+    {
+        if (paramId == ParamId::KICK_TUNE)
+        {
+            const double hz = (val > 20.0) ? val : (35.0 + val * 65.0);
+            return juce::String(hz, 0) + " Hz";
+        }
+        if (paramId == ParamId::SNARE_TUNE || paramId == ParamId::TOM_TUNE
+            || paramId == ParamId::PERC1_TUNE || paramId == ParamId::PERC2_TUNE)
+        {
+            const double hz = (val > 20.0) ? val : (60.0 + val * 340.0);
+            return juce::String(hz, 0) + " Hz";
+        }
+        if (paramId == ParamId::MASTER_DRIVE)
+            return "+" + juce::String(std::clamp(val, 0.0, 1.0) * 18.0, 1) + " dB";
+        if (paramId == ParamId::DJ_FILTER)
+        {
+            const double a = std::abs(val);
+            if (a < 0.015) return "BYP";
+            if (val < 0.0)
+            {
+                const double fc = 18000.0 * std::pow(160.0 / 18000.0, a);
+                return (fc >= 1000.0 ? juce::String(fc / 1000.0, 1) + " k" : juce::String(fc, 0) + " Hz");
+            }
+            const double fc = 35.0 * std::pow(215.0, a);
+            return (fc >= 1000.0 ? juce::String(fc / 1000.0, 1) + " k" : juce::String(fc, 0) + " Hz");
+        }
+        return format(paramId, val);
+    }
+
+    // Shared HUD notification hook (UI thread only) so hovering/dragging any DjKnob
+    // displays its live engineering readout & morphing DSP curve inside the top CRT.
     struct HudState
     {
         juce::String text;
+        juce::String activeParamId;
         double       lastUpdateMs = 0.0;
     };
 
@@ -116,6 +154,7 @@ namespace MusicalUnits
     inline void publishHud(const juce::String& label, const juce::String& paramId, double val)
     {
         hud().text = label.toUpperCase() + " // " + format(paramId, val);
+        hud().activeParamId = paramId;
         hud().lastUpdateMs = juce::Time::getMillisecondCounterHiRes();
     }
 } // namespace MusicalUnits

@@ -24,12 +24,16 @@ public:
         // Band-pass for noise: HP@6kHz + LP@16kHz
         noiseHpAlpha = 1.0f - static_cast<float>(std::exp(-Dsp::TWO_PI * 6000.0 / sr));
         noiseLpAlpha = 1.0f - static_cast<float>(std::exp(-Dsp::TWO_PI * 16000.0 / sr));
+        declickCoeff = static_cast<float>(std::exp(-1.0 / (0.0018 * sr)));
+        declickTail = lastOut = 0.0f;
     }
 
     void setParams(const Params& p) { params = p; }
 
     void trigger(float velocity = 1.0f)
     {
+        if (samplesRemaining > 0)
+            declickTail = std::clamp(declickTail + lastOut, -1.0f, 1.0f);
         vel = std::clamp(velocity, 0.0f, 1.0f);
         durationSamples  = static_cast<int>(sampleRate * params.decay * 4.0);
         samplesRemaining = durationSamples;
@@ -104,10 +108,16 @@ public:
         // Soft saturation, with 0.8x for headroom (hats spike on transients)
         out = fastTanh(out * 1.4f) * 0.80f;
 
-        // Anti-click
+        // Anti-click attack + 1.8 ms retrigger de-click tail
         if (attackCounter < attackSamples)
             out *= static_cast<float>(attackCounter++) / static_cast<float>(attackSamples);
-
+        if (std::abs(declickTail) > 1.0e-5f)
+        {
+            out += declickTail;
+            declickTail *= declickCoeff;
+        }
+        else declickTail = 0.0f;
+        lastOut = out;
         return out;
     }
 
@@ -124,4 +134,5 @@ private:
     float    ringCoeff = 0.999f, ringState = 1.0f;
     NoiseGen noiseGen { 77777 };
     int      attackSamples = 22, attackCounter = 22;
+    float    declickCoeff = 0.985f, declickTail = 0.0f, lastOut = 0.0f;
 };

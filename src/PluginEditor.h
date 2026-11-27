@@ -39,12 +39,13 @@ public:
     ~OldSchoolBoxView() override;
 
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
     void timerCallback() override;
     bool keyPressed(const juce::KeyPress& key) override;
     void mouseDown(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
-    // Drag & drop WAV/AIFF directly onto the plugin to load into Chaos Sample Bus
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
@@ -55,19 +56,15 @@ public:
 private:
     static std::size_t idx(int i) { return static_cast<std::size_t>(i); }
 
-    static constexpr int TITLE_H    = 54;
-    static constexpr int MASTER_H   = 146; // LIVE row (30) + 3-module Lower Rack (116)
-    static constexpr int LIVE_ROW_H = 30;
-    static constexpr int MK_SZ      = 36;
-    static constexpr int CK_SZ      = 30;  // Chaos micro-knobs
-    static constexpr int SCENE_BTN_W = 32;
-    static constexpr int FILL_BTN_W  = 66;
-    static constexpr int METER_W     = 48;
+    static constexpr int TITLE_H    = 26;
+    static constexpr int MASTER_H   = 130;
+    static constexpr int MK_SZ      = 48;  // Big uniform Master FX knobs
+    static constexpr int CK_SZ      = 46;  // Big Chaos Sampler knobs inside Center Screen
 
     OldSchoolBoxProcessor& processorRef;
     SpaceLookAndFeel spaceLnf;
     StepGrid stepGrid;
-    juce::TooltipWindow tooltipWindow { this, 400 };
+    juce::String activeTopHint;
     juce::Image spaceLogo;
     juce::Image noiseTile;
     std::unique_ptr<juce::FileChooser> wavChooser;
@@ -79,27 +76,39 @@ private:
         juce::String label;
     };
     std::array<MasterKnob, 8> masterKnobs;
+    std::unique_ptr<juce::Slider> masterVolFader;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> masterVolAttachment;
 
-    // Chaos Sample Bus controls (Module 1)
+    // Chaos Sample Bus controls (live inside Center Screen when CHAOS tab is active + quick toggle in bottom rack!)
     juce::TextButton chaosEnableButton;
+    juce::TextButton chaosOpenButton;
+    juce::TextButton chaosTrigButton;
+    juce::TextButton chaosLoopButton;
+    juce::TextButton chaosRevButton;
+    juce::TextButton chaosStutButton;
+    juce::TextButton chaosSpiralButton;
     juce::TextButton chaosBankButton;
     juce::TextButton chaosWavButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> chaosEnableAttachment;
     std::array<MasterKnob, 5> chaosKnobs; // DENS, GATE, GRIT, PTCH, VOL
 
-    // Module 2 & 3 extra controls + Top-bar THEME switch
+    // Master FX extra controls + Top-bar THEME switch
     juce::TextButton dubThrowButton;
+    juce::TextButton spiralButton;
+    std::unique_ptr<DjKnob> spiralDriveKnob;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> spiralDriveAttachment;
     juce::TextButton monoSubButton;
     juce::TextButton killSubButton;
     juce::TextButton themeButton;
+    juce::TextButton vizButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> monoSubAttachment;
 
     // Live performance controls
-    std::array<juce::TextButton, Scenes::COUNT> sceneButtons;  // A/B/C/D
-    juce::TextButton revertButton;   // Snap-Back / Panic Reload (Elektron-style)
-    juce::TextButton qntButton;      // Quantize mode: QNT:1B / QNT:1/4 / QNT:OFF
-    DragExportButton dragWavButton;  // Drag & drop 4-bar WAV straight into DAW
-    DragExportButton dragMidiButton; // Drag & drop 4-bar MIDI straight into DAW
+    std::array<juce::TextButton, Scenes::COUNT> sceneButtons;
+    juce::TextButton revertButton;
+    juce::TextButton qntButton;
+    DragExportButton dragWavButton;
+    DragExportButton dragMidiButton;
     juce::TextButton undoButton;
     juce::TextButton redoButton;
     juce::TextButton helpButton;
@@ -121,12 +130,14 @@ private:
     int64_t lastDrawnFillBar = -2;
     int lastDrawnSyncDiv = -1;
     int lastDrawnChaosBank = -1;
-    float pressurePeakHold = 0.0f;
-    int   pressurePeakTicks = 0;
-    float meterSmoothL = 0.0f, meterSmoothR = 0.0f;
+    float masterMeterL = 0.0f, masterMeterR = 0.0f;
+    float masterPeakHoldL = 0.0f, masterPeakHoldR = 0.0f;
+    int   masterPeakTicksL = 0, masterPeakTicksR = 0;
     double bootStartMs = 0.0;
     bool   bootDone    = false;
 
+    juce::Rectangle<int> patLenBoxRect() const;
+    void layoutChaosControls();
     void updateSyncLabel();
     void updateChaosBankLabel();
     void refreshSceneVisuals();
@@ -135,8 +146,6 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OldSchoolBoxView)
 };
 
-// Resizable wrapper editor: scales OldSchoolBoxView proportionally (65%..150%)
-// so the plugin fits comfortably on 13"/14" laptops and 4K monitors alike.
 class OldSchoolBoxEditor : public juce::AudioProcessorEditor
 {
 public:

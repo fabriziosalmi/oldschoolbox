@@ -15,6 +15,8 @@ public:
         envelope      = 0.0f;
         rmsState      = 0.0f;
         lastReductionDb = 0.0f;
+        scHpAlpha     = static_cast<float>(std::exp(-6.283185307179586 * 65.0 / std::max(8000.0, sr)));
+        scHpL = scHpPrevL = scHpR = scHpPrevR = 0.0f;
         updateCoeffs();
     }
 
@@ -28,11 +30,16 @@ public:
     {
         if (amount < 0.001f) return;
 
-        const float aL = std::abs(L), aR = std::abs(R);
-        const float peak = aL > aR ? aL : aR;
-        rmsState = peak * peak + (rmsState - peak * peak) * rmsCoeff;
+        // 90 Hz Sidechain High-Pass on RMS body detector (SSL/API thrust style):
+        // prevents sustained sub-bass from pumping hats/303 while Peak detector still tames heavy transients!
+        scHpL = scHpAlpha * (scHpL + L - scHpPrevL); scHpPrevL = L;
+        scHpR = scHpAlpha * (scHpR + R - scHpPrevR); scHpPrevR = R;
+
+        const float hpPeak  = std::max(std::abs(scHpL), std::abs(scHpR));
+        const float rawPeak = std::max(std::abs(L), std::abs(R));
+        rmsState = hpPeak * hpPeak + (rmsState - hpPeak * hpPeak) * rmsCoeff;
         const float rms = std::sqrt(std::max(0.0f, rmsState));
-        const float detector = rms * 0.68f + peak * 0.32f;
+        const float detector = rms * 0.55f + rawPeak * 0.45f;
 
         const float coef = (detector > envelope) ? attackCoeff : releaseCoeff;
         envelope = detector + (envelope - detector) * coef;
@@ -78,6 +85,8 @@ private:
     float  rmsCoeff      = 0.999f;
     float  amount        = 0.0f;
     float  lastReductionDb = 0.0f;
+    float  scHpAlpha     = 0.985f;
+    float  scHpL = 0.0f, scHpPrevL = 0.0f, scHpR = 0.0f, scHpPrevR = 0.0f;
 
     void updateCoeffs()
     {

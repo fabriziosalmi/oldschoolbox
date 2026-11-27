@@ -35,6 +35,8 @@ public:
         // DC blocker — removes the asymmetry from drive saturation
         dcBlockerAlpha = static_cast<float>(std::exp(-Dsp::TWO_PI * 20.0 / sr));
         dcInPrev = dcOut = 0.0f;
+        declickCoeff = static_cast<float>(std::exp(-1.0 / (0.0018 * sr))); // 1.8 ms retrigger de-click
+        declickTail = lastOut = 0.0f;
         beaterPhase = 0.0;
         beaterEnv = 0.0f;
         knockEnv = 0.0f;
@@ -53,6 +55,8 @@ public:
 
     void trigger(float velocity = 1.0f)
     {
+        if (samplesRemaining > 0)
+            declickTail = std::clamp(declickTail + lastOut, -1.0f, 1.0f);
         vel = std::clamp(velocity, 0.0f, 1.0f);
         durationSamples  = static_cast<int>(sampleRate * params.decay * 3.25);
         samplesRemaining = durationSamples;
@@ -219,8 +223,19 @@ public:
         if (attackCounter < attackSamples)
             out *= static_cast<float>(attackCounter++) / static_cast<float>(attackSamples);
 
-        // Soft ceiling: louder perceived punch, bounded output.
-        return fastTanh(out * (1.10f + params.drive * 0.28f)) * (0.94f - params.drive * 0.04f);
+        // Soft ceiling: louder perceived punch, bounded output (+ 1.8 ms retrigger de-click tail)
+        float finalOut = fastTanh(out * (1.10f + params.drive * 0.28f)) * (0.94f - params.drive * 0.04f);
+        if (std::abs(declickTail) > 1.0e-5f)
+        {
+            finalOut = std::clamp(finalOut + declickTail, -0.98f, 0.98f);
+            declickTail *= declickCoeff;
+        }
+        else
+        {
+            declickTail = 0.0f;
+        }
+        lastOut = finalOut;
+        return finalOut;
     }
 
 private:
@@ -276,4 +291,7 @@ private:
     NoiseGen noiseGen { 12345 };
     int     attackSamples    = 22;
     int     attackCounter    = 22;
+    float   declickCoeff     = 0.985f;
+    float   declickTail      = 0.0f;
+    float   lastOut          = 0.0f;
 };

@@ -25,6 +25,19 @@ float VoiceBank::raw(const char* id) const
     return apvts.getRawParameterValue(id)->load();
 }
 
+float VoiceBank::modded(int ch, int targetSlot, const char* id) const
+{
+    if (!lfoBank) return raw(id);
+    const float off = lfoBank->getOffsetFor(ch, targetSlot);
+    if (std::abs(off) < 1.0e-5f) return raw(id);
+    if (auto* p = apvts.getParameter(id))
+    {
+        const float norm = std::clamp(p->convertTo0to1(raw(id)) + off, 0.0f, 1.0f);
+        return p->convertFrom0to1(norm);
+    }
+    return raw(id);
+}
+
 void VoiceBank::prepare(double sr)
 {
     storedSampleRate = sr;
@@ -77,10 +90,12 @@ void VoiceBank::trigger(int ch, float vel)
 {
     if (validBus(ch))
         channelVelocity[busIndex(ch)] = vel;
+    // TIGHT performance macro: tightens all 6 drum decays to 0.62x for instant pre-drop punch!
+    const float tightDec = (raw(ParamId::TIGHT) > 0.5f) ? 0.62f : 1.0f;
     switch (ch)
     {
         case OsbBus::KICK:
-            kick.setParams({ raw(ParamId::KICK_TUNE), raw(ParamId::KICK_DECAY),
+            kick.setParams({ modded(0, 0, ParamId::KICK_TUNE), modded(0, 1, ParamId::KICK_DECAY) * tightDec,
                              raw(ParamId::KICK_PUNCH), raw(ParamId::KICK_PITCHENV),
                              raw(ParamId::KICK_DRIVE), raw(ParamId::KICK_SUB) });
             kick.trigger(vel);
@@ -99,28 +114,28 @@ void VoiceBank::trigger(int ch, float vel)
             break;
 
         case OsbBus::SNARE:
-            snare.setParams({ raw(ParamId::SNARE_TUNE), raw(ParamId::SNARE_DECAY),
-                              raw(ParamId::SNARE_SNAP), raw(ParamId::SNARE_NOISE) });
+            snare.setParams({ modded(1, 0, ParamId::SNARE_TUNE), raw(ParamId::SNARE_DECAY) * tightDec,
+                              modded(1, 1, ParamId::SNARE_SNAP), raw(ParamId::SNARE_NOISE) });
             snare.trigger(vel); break;
 
         case OsbBus::HAT:
-            hats.setParams({ raw(ParamId::HATS_DECAY), raw(ParamId::HATS_TONE),
+            hats.setParams({ modded(2, 0, ParamId::HATS_DECAY) * tightDec, modded(2, 1, ParamId::HATS_TONE),
                              raw(ParamId::HATS_BODY) });
             hats.trigger(vel); break;
 
         case OsbBus::TOM:
-            tom.setParams({ raw(ParamId::TOM_TUNE), raw(ParamId::TOM_DECAY),
+            tom.setParams({ modded(3, 0, ParamId::TOM_TUNE), modded(3, 1, ParamId::TOM_DECAY) * tightDec,
                             raw(ParamId::TOM_PITCHENV), raw(ParamId::TOM_ATTACK) });
             tom.trigger(vel); break;
 
         case OsbBus::PERC1:
-            perc1.setParams({ raw(ParamId::PERC1_TUNE), raw(ParamId::PERC1_DECAY),
-                              raw(ParamId::PERC1_DETUNE), raw(ParamId::PERC1_DRIVE) });
+            perc1.setParams({ modded(4, 0, ParamId::PERC1_TUNE), raw(ParamId::PERC1_DECAY) * tightDec,
+                              raw(ParamId::PERC1_DETUNE), modded(4, 1, ParamId::PERC1_DRIVE) });
             perc1.trigger(vel); break;
 
         case OsbBus::PERC2:
-            perc2.setParams({ raw(ParamId::PERC2_TUNE), raw(ParamId::PERC2_DECAY),
-                              raw(ParamId::PERC2_NOISE), raw(ParamId::PERC2_PITCH) });
+            perc2.setParams({ modded(5, 0, ParamId::PERC2_TUNE), raw(ParamId::PERC2_DECAY) * tightDec,
+                              raw(ParamId::PERC2_NOISE), modded(5, 1, ParamId::PERC2_PITCH) });
             perc2.trigger(vel); break;
 
         default: break;
@@ -139,13 +154,13 @@ void VoiceBank::triggerBass303(int idx, int midiNote, float vel, bool slide, boo
         channelVelocity[busIndex(OsbBus::BASS1 + idx)] = vel;
         uiBassNotes[bassIndex(idx)].store(midiNote, std::memory_order_relaxed);
 
-        // Read and apply 303 params for this bass channel
+        // Read and apply 303 params for this bass channel (with BeatLfo modulation!)
         if (idx == 0)
-            bass[0].setParams({ raw(ParamId::BASS1_CUTOFF), raw(ParamId::BASS1_RESO),
+            bass[0].setParams({ modded(6, 0, ParamId::BASS1_CUTOFF), modded(6, 1, ParamId::BASS1_RESO),
                                 raw(ParamId::BASS1_ENVMOD), raw(ParamId::BASS1_DECAY),
                                 raw(ParamId::BASS1_ACCENT) });
         else
-            bass[1].setParams({ raw(ParamId::BASS2_CUTOFF), raw(ParamId::BASS2_RESO),
+            bass[1].setParams({ modded(7, 0, ParamId::BASS2_CUTOFF), modded(7, 1, ParamId::BASS2_RESO),
                                 raw(ParamId::BASS2_ENVMOD), raw(ParamId::BASS2_DECAY),
                                 raw(ParamId::BASS2_ACCENT) });
 
@@ -204,13 +219,13 @@ void VoiceBank::renderBus(int ch, float* L, float* R, int n, float vol)
     // Safety: if called with null buffers, nothing to do
     if (L == nullptr) return;
 
-    // Refresh bass params every buffer so automation is tracked (smoothing is per-sample inside BassVoice)
+    // Refresh bass params every buffer so automation & BeatLfo are tracked smoothly
     if (ch == OsbBus::BASS1)
-        bass[0].setParams({ raw(ParamId::BASS1_CUTOFF), raw(ParamId::BASS1_RESO),
+        bass[0].setParams({ modded(6, 0, ParamId::BASS1_CUTOFF), modded(6, 1, ParamId::BASS1_RESO),
                             raw(ParamId::BASS1_ENVMOD), raw(ParamId::BASS1_DECAY),
                             raw(ParamId::BASS1_ACCENT) });
     else if (ch == OsbBus::BASS2)
-        bass[1].setParams({ raw(ParamId::BASS2_CUTOFF), raw(ParamId::BASS2_RESO),
+        bass[1].setParams({ modded(7, 0, ParamId::BASS2_CUTOFF), modded(7, 1, ParamId::BASS2_RESO),
                             raw(ParamId::BASS2_ENVMOD), raw(ParamId::BASS2_DECAY),
                             raw(ParamId::BASS2_ACCENT) });
 

@@ -47,6 +47,8 @@ public:
         hpAlpha  = static_cast<float>(std::exp(-Dsp::TWO_PI * 400.0 / sampleRate));
         dcAlpha  = static_cast<float>(std::exp(-Dsp::TWO_PI * 20.0  / sampleRate));
         gateAlpha = 1.0f - static_cast<float>(std::exp(-1.0 / (0.004 * sampleRate)));
+        declickCoeff = static_cast<float>(std::exp(-1.0 / (0.0018 * sampleRate)));
+        declickTail = lastRawSample = 0.0f;
         hp1State = hp1Prev = hp2State = hp2Prev = 0.0f;
         bpLp = bpBp = 0.0f;
         dcPrev = dcOut = 0.0f;
@@ -64,22 +66,65 @@ public:
         updatePreviewFromActive();
     }
 
-    // UI thread: load a short WAV/AIFF file (clamped to 8s, resampled to current sampleRate)
+    // Background-thread WAV/AIFF decode & resample (zero UI/audio glitch when dropping 8s files at 170 BPM!)
+    void loadCustomFileAsync(const juce::File& file, std::function<void(bool)> onCompleteOnMessageThread)
+    {
+        const double sr = sampleRate;
+        juce::Thread::launch([this, file, sr, onDone = std::move(onCompleteOnMessageThread)]() mutable {
+            auto loaded = decodeFileOffThread(file, sr);
+            juce::MessageManager::callAsync([this, sample = std::move(loaded), finish = std::move(onDone)]() mutable {
+                bool ok = false;
+                if (sample && !sample->samples.empty())
+                {
+                    commitCustomSampleOnUiThread(std::move(sample));
+                    ok = true;
+                }
+                if (finish) finish(ok);
+            });
+        });
+    }
+
+    // Synchronous helper (tests / CLI): decodes and commits immediately
     bool loadCustomFile(const juce::File& file)
+    {
+        auto decoded = decodeFileOffThread(file, sampleRate);
+        if (!decoded || decoded->samples.empty())
+            return false;
+        commitCustomSampleOnUiThread(std::move(decoded));
+        return true;
+    }
+
+    // UI-thread timer garbage collector: safely releases retired sample buffers only after
+    // the audio thread is guaranteed not to reference them (zero delete on audio thread!).
+    void collectGarbage()
+    {
+        if (retiredSamples.empty()) return;
+        const int inUse = audioReadingSlot.load(std::memory_order_acquire);
+        const int cur   = customReadSlot.load(std::memory_order_acquire);
+        retiredSamples.erase(
+            std::remove_if(retiredSamples.begin(), retiredSamples.end(),
+                [inUse, cur](const RetiredEntry& e) {
+                    return e.slot != inUse && e.slot != cur;
+                }),
+            retiredSamples.end());
+    }
+
+private:
+    static std::shared_ptr<SampleData> decodeFileOffThread(const juce::File& file, double targetSr)
     {
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
         if (!reader || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
-            return false;
+            return nullptr;
 
         const int64_t maxSrcSamples = static_cast<int64_t>(reader->sampleRate * 8.0);
         const int srcLen = static_cast<int>(std::min<int64_t>(reader->lengthInSamples, maxSrcSamples));
         juce::AudioBuffer<float> tmp(static_cast<int>(reader->numChannels), srcLen);
         reader->read(&tmp, 0, srcLen, 0, true, true);
 
-        const double ratio = sampleRate / reader->sampleRate;
-        const int dstLen = std::max(64, std::min(static_cast<int>(sampleRate * 8.0),
+        const double ratio = targetSr / reader->sampleRate;
+        const int dstLen = std::max(64, std::min(static_cast<int>(targetSr * 8.0),
                                                  static_cast<int>(std::round(srcLen * ratio))));
         auto data = std::make_shared<SampleData>();
         data->name = file.getFileNameWithoutExtension().substring(0, 12).toUpperCase();
@@ -99,6 +144,7 @@ public:
                 mono += p[i0] * (1.0f - frac) + p[i1] * frac;
             }
             mono /= static_cast<float>(std::max(1, tmp.getNumChannels()));
+            if (!std::isfinite(mono)) mono = 0.0f;
             data->samples[static_cast<size_t>(i)] = mono;
             peak = std::max(peak, std::abs(mono));
         }
@@ -107,17 +153,59 @@ public:
             const float norm = 0.90f / peak;
             for (auto& s : data->samples) s *= norm;
         }
+        return data;
+    }
 
-        // Lock-free handoff via double-buffered atomic slot
-        const int nextSlot = 1 - customReadSlot.load(std::memory_order_acquire);
+    void commitCustomSampleOnUiThread(std::shared_ptr<SampleData> data)
+    {
+        const int cur = customReadSlot.load(std::memory_order_acquire);
+        const int inUse = audioReadingSlot.load(std::memory_order_acquire);
+        int nextSlot = (cur + 1) % NUM_CUSTOM_SLOTS;
+        if (nextSlot == inUse) nextSlot = (nextSlot + 1) % NUM_CUSTOM_SLOTS;
+
+        if (customSlots[static_cast<size_t>(nextSlot)])
+            retiredSamples.push_back({ nextSlot, std::move(customSlots[static_cast<size_t>(nextSlot)]) });
+
         customSlots[static_cast<size_t>(nextSlot)] = std::move(data);
         customReadSlot.store(nextSlot, std::memory_order_release);
         hasCustom.store(true, std::memory_order_release);
         updatePreviewFromBuffer(customSlots[static_cast<size_t>(nextSlot)]->samples);
-        return true;
     }
 
+public:
+
     bool hasCustomSample() const { return hasCustom.load(std::memory_order_acquire); }
+    bool isPlaying() const { return active; }
+
+    static const char* loopModeName(int m)
+    {
+        static const char* kNames[5] = { "LOOP", "LOOP 1/4", "LOOP 1/2", "LOOP 1B", "LOOP 2B" };
+        return kNames[std::clamp(m, 0, 4)];
+    }
+
+    // DJ Vibe controls (RT-safe atomics)
+    std::atomic<int>   loopMode       { 0 };     // 0=OFF, 1=1/4 (4 steps), 2=1/2 (8 steps), 3=1B (16 steps), 4=2B (32 steps)
+    std::atomic<bool>  userReverse    { false }; // 1-click reverse
+    std::atomic<bool>  stutterHeld    { false }; // momentary 1/16 beat-repeat roll
+    std::atomic<float> sliceStartNorm { 0.0f };  // 0..1 click-to-slice start point
+
+    // UI thread: request an immediate manual one-shot audition trigger
+    void requestManualTrigger() { manualTriggerReq.store(true, std::memory_order_release); }
+
+    // UI thread: click-to-slice on waveform (sets start offset & fires immediately)
+    void triggerFromSlice(float norm01)
+    {
+        sliceStartNorm.store(std::clamp(norm01, 0.0f, 0.95f), std::memory_order_relaxed);
+        manualTriggerReq.store(true, std::memory_order_release);
+    }
+
+    // Audio thread: consume manual trigger request
+    void consumeManualTrigger(int bankIdx)
+    {
+        if (manualTriggerReq.exchange(false, std::memory_order_acq_rel))
+            triggerSlice(bankIdx, 1.0, userReverse.load(std::memory_order_relaxed), 0.5f,
+                         static_cast<double>(sliceStartNorm.load(std::memory_order_relaxed)));
+    }
 
     // Called from audio thread on each 16th-note step boundary
     void onStep(int stepInBar,
@@ -155,10 +243,32 @@ public:
         if (barIn16 >= 14) prob *= 1.50f;
         if ((stepInBar & 3) == 2) prob *= 1.35f; // favor offbeats
 
+        // Momentary 1/16 STUT (Beat-Repeat Roll): locks onto current slice every 16th step!
+        const bool stut = stutterHeld.load(std::memory_order_relaxed);
+        const bool uRev = userReverse.load(std::memory_order_relaxed);
+        const double sliceOff = static_cast<double>(sliceStartNorm.load(std::memory_order_relaxed));
+        if (stut)
+        {
+            triggerSlice(bankIdx, 1.0, uRev, 0.5f, sliceOff);
+            return;
+        }
+
+        // Beat-Synced Auto-Loop Mode (1/4 = 4 steps, 1/2 = 8 steps, 1B = 16 steps, 2B = 32 steps)
+        const int lMode = std::clamp(loopMode.load(std::memory_order_relaxed), 0, 4);
+        if (lMode > 0)
+        {
+            static constexpr int kLoopSteps[5] = { 0, 4, 8, 16, 32 };
+            const int period = kLoopSteps[lMode];
+            const int64_t totalStep = std::max<int64_t>(0, currentBar) * 16 + (stepInBar & 15);
+            if ((totalStep % period) == 0)
+                triggerSlice(bankIdx, 1.0, uRev, 0.5f, sliceOff);
+            return;
+        }
+
         // FILL stutter mode (#16): ratchet rising-pitch slice every 16th
         if (inFill)
         {
-            triggerSlice(bankIdx, 1.0 + static_cast<double>(stepInBar & 7) * 0.08, false, 0.5f, 0.0);
+            triggerSlice(bankIdx, 1.0 + static_cast<double>(stepInBar & 7) * 0.08, uRev, 0.5f, sliceOff);
             if (stepInBar == 12) triggerDubThrowOut = true;
             return;
         }
@@ -173,7 +283,7 @@ public:
             const double semis = (pitchChaos > 0.05f) ? kSemis[rng % 6u] * static_cast<double>(pitchChaos) : 0.0;
             const double rate = std::pow(2.0, semis / 12.0);
             rng = nextRng(rng);
-            const bool rev = (pitchChaos > 0.25f) && ((rng % 100u) < 20u);
+            const bool rev = uRev || ((pitchChaos > 0.25f) && ((rng % 100u) < 20u));
             rng = nextRng(rng);
             const float pan = 0.15f + (static_cast<float>(rng & 0xFFu) / 255.0f) * 0.70f;
 
@@ -181,7 +291,7 @@ public:
             if (barIn4 == 3 && (stepInBar == 8 || stepInBar == 12))
                 triggerDubThrowOut = true;
 
-            triggerSlice(bankIdx, rate, rev, pan, 0.0);
+            triggerSlice(bankIdx, rate, rev, pan, sliceOff);
         }
     }
 
@@ -199,6 +309,12 @@ public:
         const int idx0 = static_cast<int>(playPos);
         if (idx0 < 0 || idx0 >= len)
         {
+            if (loopMode.load(std::memory_order_relaxed) > 0)
+            {
+                const double sStart = static_cast<double>(sliceStartNorm.load(std::memory_order_relaxed)) * static_cast<double>(len - 1);
+                playPos = reversePlay ? static_cast<double>(len - 1) : sStart;
+                return;
+            }
             active = false;
             playheadNorm.store(-1.0f, std::memory_order_relaxed);
             return;
@@ -208,6 +324,15 @@ public:
         const float frac = static_cast<float>(playPos - idx0);
         float s = (*activeBuf)[static_cast<size_t>(idx0)] * (1.0f - frac)
                 + (*activeBuf)[static_cast<size_t>(idx1)] * frac;
+
+        // 1.8 ms retrigger / STUT micro-declicker (eliminates slice-jump clicks!)
+        if (std::abs(declickTail) > 1.0e-5f)
+        {
+            s += declickTail;
+            declickTail *= declickCoeff;
+        }
+        else declickTail = 0.0f;
+        lastRawSample = s;
 
         playPos += reversePlay ? -playRate : playRate;
         playheadNorm.store(std::clamp(static_cast<float>(playPos) / static_cast<float>(len), 0.0f, 1.0f),
@@ -289,15 +414,20 @@ private:
     {
         if (bankIdx == CUSTOM_BANK_IDX && hasCustom.load(std::memory_order_acquire))
         {
-            const auto& ptr = customSlots[static_cast<size_t>(customReadSlot.load(std::memory_order_acquire))];
+            const int slot = customReadSlot.load(std::memory_order_acquire);
+            audioReadingSlot.store(slot, std::memory_order_release);
+            const auto& ptr = customSlots[static_cast<size_t>(slot)];
             activeBuf = ptr ? &ptr->samples : &factoryBanks[0];
         }
         else
         {
+            audioReadingSlot.store(-1, std::memory_order_release);
             activeBuf = &factoryBanks[static_cast<size_t>(std::clamp(bankIdx, 0, NUM_FACTORY_BANKS - 1))];
         }
         if (!activeBuf || activeBuf->empty()) return;
 
+        if (active)
+            declickTail = std::clamp(declickTail + lastRawSample, -1.0f, 1.0f);
         playRate = std::clamp(rate, 0.25, 3.0);
         reversePlay = rev;
         panPos = pan;
@@ -418,11 +548,17 @@ private:
         });
     }
 
+    static constexpr int NUM_CUSTOM_SLOTS = 8;
+    struct RetiredEntry { int slot = -1; std::shared_ptr<SampleData> data; };
+
     double sampleRate = 44100.0;
     std::array<std::vector<float>, NUM_FACTORY_BANKS> factoryBanks;
-    std::array<std::shared_ptr<SampleData>, 2> customSlots;
-    std::atomic<int>  customReadSlot { 0 };
-    std::atomic<bool> hasCustom { false };
+    std::array<std::shared_ptr<SampleData>, NUM_CUSTOM_SLOTS> customSlots;
+    std::vector<RetiredEntry> retiredSamples; // UI-thread GC only — never touched by audio thread!
+    std::atomic<int>  customReadSlot   { 0 };
+    std::atomic<int>  audioReadingSlot { -1 };
+    std::atomic<bool> hasCustom        { false };
+    std::atomic<bool> manualTriggerReq { false };
 
     const std::vector<float>* activeBuf = nullptr;
     bool   active = false;
@@ -439,6 +575,7 @@ private:
     float dcAlpha = 0.997f, dcPrev = 0.0f, dcOut = 0.0f;
     float srHold = 0.0f;
     int   srCounter = 0;
+    float declickCoeff = 0.985f, declickTail = 0.0f, lastRawSample = 0.0f;
 
     std::array<std::atomic<float>, PREVIEW_POINTS> previewWave {};
     std::atomic<float> playheadNorm { -1.0f };
