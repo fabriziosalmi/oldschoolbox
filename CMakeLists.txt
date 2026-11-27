@@ -1,8 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
-project(OldSchoolBox VERSION 0.7.1)
+project(OldSchoolBox VERSION 0.7.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(OSB_COPY_PLUGIN "Copy built plugins to local user plugin folders" ON)
+if(APPLE)
+    set(OSB_PLUGIN_FORMATS VST3 AU Standalone)
+else()
+    set(OSB_PLUGIN_FORMATS VST3 Standalone)
+endif()
 
 add_subdirectory(JUCE)
 
@@ -10,14 +17,14 @@ juce_add_plugin(OldSchoolBox
     COMPANY_NAME "FabLab"
     PLUGIN_MANUFACTURER_CODE Fblb
     PLUGIN_CODE Osb0
-    FORMATS VST3 AU Standalone
+    FORMATS ${OSB_PLUGIN_FORMATS}
     PRODUCT_NAME "OldSchoolBox"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT TRUE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${OSB_COPY_PLUGIN}
 )
 
 target_sources(OldSchoolBox PRIVATE
@@ -36,6 +43,8 @@ target_compile_definitions(OldSchoolBox PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_USE_OGGVORBIS=0
+    _USE_MATH_DEFINES
+    NOMINMAX
 )
 
 juce_generate_juce_header(OldSchoolBox)
@@ -81,6 +90,10 @@ add_executable(master_output_probe tests/master_output_probe.cpp)
 target_include_directories(master_output_probe PRIVATE src)
 target_compile_features(master_output_probe PRIVATE cxx_std_17)
 
+foreach(probe acid303_probe kick_probe hats_probe aa_probe ref303_probe master_output_probe)
+    target_compile_definitions(${probe} PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endforeach()
+
 add_executable(state_probe
     tests/state_probe.cpp
     src/PluginProcessor.cpp
@@ -97,6 +110,8 @@ target_compile_definitions(state_probe PRIVATE
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_USE_OGGVORBIS=0
+    _USE_MATH_DEFINES
+    NOMINMAX
     JucePlugin_Name="OldSchoolBox"
 )
 target_link_libraries(state_probe PRIVATE
