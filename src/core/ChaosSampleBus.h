@@ -115,7 +115,9 @@ private:
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
-        if (!reader || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        if (!reader || reader->sampleRate < 8000.0 || reader->sampleRate > 384000.0
+            || reader->lengthInSamples <= 0
+            || reader->numChannels == 0 || reader->numChannels > 8)
             return nullptr;
 
         const int64_t maxSrcSamples = static_cast<int64_t>(reader->sampleRate * 8.0);

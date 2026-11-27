@@ -61,12 +61,13 @@ namespace LoopExporter
 
         const auto outFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                  .getChildFile("OldSchoolBox_4bar_" + juce::String(static_cast<int>(std::round(safeBpm))) + "bpm.mid");
-        outFile.deleteFile();
-        if (auto stream = outFile.createOutputStream())
+        juce::TemporaryFile tmpOut(outFile);
+        if (auto stream = tmpOut.getFile().createOutputStream())
         {
             mf.writeTo(*stream);
             stream->flush();
         }
+        tmpOut.overwriteTargetFileWithTemporary();
         return outFile;
     }
 
@@ -190,9 +191,9 @@ namespace LoopExporter
 
         const auto outFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                  .getChildFile("OldSchoolBox_4bar_" + juce::String(static_cast<int>(std::round(safeBpm))) + "bpm.wav");
-        outFile.deleteFile();
+        juce::TemporaryFile tmpOut(outFile);
         juce::WavAudioFormat wav;
-        if (auto stream = std::unique_ptr<juce::OutputStream>(outFile.createOutputStream()))
+        if (auto stream = std::unique_ptr<juce::OutputStream>(tmpOut.getFile().createOutputStream()))
         {
             const auto opts = juce::AudioFormatWriterOptions{}
                                   .withSampleRate(sr)
@@ -201,6 +202,7 @@ namespace LoopExporter
             if (auto writer = wav.createWriterFor(stream, opts))
                 writer->writeFromAudioSampleBuffer(outBuf, 0, totalSamples);
         }
+        tmpOut.overwriteTargetFileWithTemporary();
         return outFile;
     }
 } // namespace LoopExporter

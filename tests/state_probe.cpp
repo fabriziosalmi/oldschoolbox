@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -441,6 +442,83 @@ static void testDjLivePerformance()
     wavFile.deleteFile();
 }
 
+static void testMultiSampleRateOddBlocksCorruptXmlAndCpuBudget()
+{
+    // 1. Sample-rate invariance (44.1 / 48 / 96 / 192 kHz) + variable odd block sizes (1, 7, 13, 257)
+    static constexpr double kRates[4] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+    static constexpr int    kBlocks[4] = { 1, 7, 13, 257 };
+    for (double sr : kRates)
+    {
+        OldSchoolBoxProcessor proc;
+        proc.prepareToPlay(sr, 512);
+        proc.currentBpm.store(160.0f, std::memory_order_relaxed);
+        proc.internalPlay.store(true, std::memory_order_release);
+        if (auto* p = proc.apvts.getParameter(ParamId::REVERB_MIX)) p->setValueNotifyingHost(0.35f);
+        if (auto* p = proc.apvts.getParameter(ParamId::DELAY_MIX))  p->setValueNotifyingHost(0.25f);
+        juce::MidiBuffer midi;
+        for (int b = 0; b < 32; ++b)
+        {
+            const int n = kBlocks[b & 3];
+            juce::AudioBuffer<float> buf(2, n);
+            buf.clear();
+            midi.clear();
+            proc.processBlock(buf, midi);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < n; ++i)
+                {
+                    const float s = buf.getSample(ch, i);
+                    CHECK(std::isfinite(s) && std::abs(s) <= 1.001f);
+                }
+        }
+    }
+
+    // 2. Adversarial corrupted XML state (out-of-range activeScene must clamp to [0, 3])
+    {
+        OldSchoolBoxProcessor proc;
+        juce::MemoryBlock blob;
+        proc.getStateInformation(blob);
+        auto xml = juce::AudioProcessor::getXmlFromBinary(blob.getData(), static_cast<int>(blob.getSize()));
+        CHECK(xml != nullptr);
+        if (auto* seq = xml->getChildByName("SEQ"))
+            seq->setAttribute("activeScene", 99);
+        juce::MemoryBlock corruptHigh;
+        juce::AudioProcessor::copyXmlToBinary(*xml, corruptHigh);
+        proc.setStateInformation(corruptHigh.getData(), static_cast<int>(corruptHigh.getSize()));
+        const int hi = proc.sequencer.activeScene.load(std::memory_order_acquire);
+        CHECK(hi >= 0 && hi < Scenes::COUNT);
+
+        if (auto* seq = xml->getChildByName("SEQ"))
+            seq->setAttribute("activeScene", -5);
+        juce::MemoryBlock corruptLow;
+        juce::AudioProcessor::copyXmlToBinary(*xml, corruptLow);
+        proc.setStateInformation(corruptLow.getData(), static_cast<int>(corruptLow.getSize()));
+        const int lo = proc.sequencer.activeScene.load(std::memory_order_acquire);
+        CHECK(lo >= 0 && lo < Scenes::COUNT);
+    }
+
+    // 3. Real-time CPU headroom check: 1.0s of 8+1 audio at 44.1 kHz must render well under real-time
+    {
+        OldSchoolBoxProcessor proc;
+        proc.prepareToPlay(44100.0, 256);
+        proc.currentBpm.store(170.0f, std::memory_order_relaxed);
+        proc.internalPlay.store(true, std::memory_order_release);
+        juce::AudioBuffer<float> buf(2, 256);
+        juce::MidiBuffer midi;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int b = 0; b < 173; ++b) // ~1.004 seconds of audio
+        {
+            buf.clear();
+            midi.clear();
+            proc.processBlock(buf, midi);
+        }
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        CHECK(elapsedMs < 500);
+        std::printf("PASS: Multi-SR (44.1/48/96/192kHz), odd blocks (1/7/13/257), corrupt XML clamp, RT CPU=%lldms/1000ms\n",
+                    static_cast<long long>(elapsedMs));
+    }
+}
+
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
@@ -499,5 +577,6 @@ int main(int argc, char** argv)
     testSprint1And3Dsp();
     testChaosSampleBus();
     testDjLivePerformance();
+    testMultiSampleRateOddBlocksCorruptXmlAndCpuBudget();
     return 0;
 }

@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
 
@@ -22,7 +22,7 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build probes and plugin
-        run: cmake --build build -j4 --target state_probe acid303_probe kick_probe hats_probe aa_probe master_output_probe
+        run: cmake --build build -j4 --target state_probe acid303_probe kick_probe hats_probe aa_probe master_output_probe OldSchoolBox_VST3 OldSchoolBox_AU OldSchoolBox_Standalone
 
       - name: Run verification probes
         run: |

@@ -101,7 +101,8 @@ public:
                     if (drift > 0.0f)
                     {
                         const int av = anchor.velocities[ch][s];
-                        nv = static_cast<int>(nv * (1.0f - drift * 0.4f) + av * drift * 0.4f);
+                        nv = static_cast<int>(static_cast<float>(nv) * (1.0f - drift * 0.4f)
+                                              + static_cast<float>(av) * drift * 0.4f);
                     }
                     seq.setVelocity(ch, s, static_cast<uint8_t>(nv));
                 }

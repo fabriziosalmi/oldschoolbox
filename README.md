@@ -6,7 +6,7 @@ All 8 synth and drum voices are synthesized from scratch, paired with an RT-safe
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![Format](https://img.shields.io/badge/format-VST3%20%7C%20AU%20%7C%20Standalone-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-0.6.1--MKII-orange)
+![Version](https://img.shields.io/badge/version-0.7.2--MKII-orange)
 
 ![OldSchoolBox MKII](screenshot.png)
 
@@ -533,9 +533,14 @@ src/
     Scenes.h               Snapshot struct + capture/apply (4 scenes + FILL)
     FactoryPresets.h       5 factory preset Snapshots (Detroit/Acid/UKG/Industrial/Minimal)
     Euclidean.h            Bresenham/fractional Euclidean pattern generator
-    PlateReverb.h          Freeverb-style 8-comb + 4-allpass plate reverb
-    GlueCompressor.h       Single-knob bus glue compressor
-    OutputAnalyzer.h       Peak + RMS meter + 8-band SVF spectrum
+    PlateReverb.h          Sample-rate-invariant Freeverb plate reverb
+    GlueCompressor.h       Single-knob bus glue compressor (65 Hz SC-HPF RMS + Peak)
+    OutputAnalyzer.h       Peak + RMS meter + Phase correlation + 8-band SVF spectrum
+    ChaosSampleBus.h       RT-safe async WAV/AIFF loader + Tekno DNA sample bus
+    SpiralFx.h             Beat-synced Jet Flanger + 3/16 Gated Dub Delay + Drive
+    BeatLfo.h              Per-channel beat-synced 32-bar LFO bank
+    LoopExporter.h         Atomic 2-pass seamless 4-bar WAV & MIDI exporter
+    ChannelPatternPresets.h 4-slot quick jam pattern presets per channel
 
   voices/
     DspConstants.h         Math constants, fastSin, fastTanh, NoiseGen

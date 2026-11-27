@@ -96,6 +96,7 @@ void OldSchoolBoxProcessor::prepareToPlay(double sampleRate, int)
     smReverbMix = apvts.getRawParameterValue(ParamId::REVERB_MIX)->load();
     smCompAmt   = apvts.getRawParameterValue(ParamId::COMP_AMOUNT)->load();
     smDjFilter  = apvts.getRawParameterValue(ParamId::DJ_FILTER)->load();
+    smMasterVol = apvts.getRawParameterValue(ParamId::MASTER_VOL)->load();
     djSvfL = {}; djSvfR = {};
     killHpAlpha   = static_cast<float>(std::exp(-Dsp::TWO_PI * 120.0 / sampleRate));
     killFadeAlpha = 1.0f - static_cast<float>(std::exp(-1.0 / (0.012 * sampleRate))); // 12 ms clickless crossfade
@@ -967,7 +968,7 @@ void OldSchoolBoxProcessor::setStateInformation(const void* data, int sizeInByte
             for (auto& sc : scenes) Scenes::capture(sc, sequencer);
         }
         sequencer.activeScene.store(
-            static_cast<int>(seq.getProperty("activeScene", 0)),
+            std::clamp(static_cast<int>(seq.getProperty("activeScene", 0)), 0, Scenes::COUNT - 1),
             std::memory_order_release);
         sequencer.queuedScene.store(-1, std::memory_order_release);
         sequencer.fillStartBar.store(-1, std::memory_order_release);

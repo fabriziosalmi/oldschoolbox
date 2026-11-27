@@ -1,0 +1,187 @@
+name: Release Multi-Arch
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: macOS Universal (arm64 + x86_64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+
+      - name: Configure Universal Release
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          -DOSB_COPY_PLUGIN=OFF
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build Plugins & Probes
+        run: >
+          cmake --build build --config Release -j4 --target
+          OldSchoolBox_VST3 OldSchoolBox_AU OldSchoolBox_Standalone
+          state_probe acid303_probe kick_probe hats_probe aa_probe master_output_probe
+
+      - name: Run Verification Probes
+        run: |
+          ./build/state_probe
+          ./build/acid303_probe
+          ./build/kick_probe
+          ./build/hats_probe
+          ./build/aa_probe
+          ./build/master_output_probe
+
+      - name: Package macOS Universal
+        run: |
+          TAG="${GITHUB_REF_NAME:-manual}"
+          STAGE="dist/OldSchoolBox-${TAG}-macOS-universal"
+          mkdir -p "${STAGE}"
+          cp -R build/OldSchoolBox_artefacts/Release/VST3/OldSchoolBox.vst3 "${STAGE}/"
+          cp -R build/OldSchoolBox_artefacts/Release/AU/OldSchoolBox.component "${STAGE}/"
+          cp -R build/OldSchoolBox_artefacts/Release/Standalone/OldSchoolBox.app "${STAGE}/"
+          cp LICENSE README.md "${STAGE}/"
+          (cd dist && ditto -c -k --sequesterRsrc --keepParent "OldSchoolBox-${TAG}-macOS-universal" "OldSchoolBox-${TAG}-macOS-universal.zip")
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-universal
+          path: dist/*.zip
+
+  build-windows:
+    name: Windows x64 (MSVC)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+
+      - name: Configure Windows x64
+        run: cmake -B build -A x64 -DOSB_COPY_PLUGIN=OFF
+
+      - name: Build Plugins & Probes
+        run: >
+          cmake --build build --config Release -j4 --target
+          OldSchoolBox_VST3 OldSchoolBox_Standalone
+          state_probe acid303_probe kick_probe hats_probe aa_probe master_output_probe
+
+      - name: Run Verification Probes
+        shell: pwsh
+        run: |
+          .\build\Release\state_probe.exe
+          .\build\Release\acid303_probe.exe
+          .\build\Release\kick_probe.exe
+          .\build\Release\hats_probe.exe
+          .\build\Release\aa_probe.exe
+          .\build\Release\master_output_probe.exe
+
+      - name: Package Windows x64
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "manual" }
+          $stage = "dist\OldSchoolBox-$tag-Windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse "build\OldSchoolBox_artefacts\Release\VST3\OldSchoolBox.vst3" "$stage\"
+          Copy-Item "build\OldSchoolBox_artefacts\Release\Standalone\OldSchoolBox.exe" "$stage\"
+          Copy-Item "LICENSE", "README.md" "$stage\"
+          Compress-Archive -Path $stage -DestinationPath "dist\OldSchoolBox-$tag-Windows-x64.zip" -Force
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x64
+          path: dist/*.zip
+
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+
+      - name: Install JUCE Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxcomposite-dev mesa-common-dev xvfb
+
+      - name: Configure Linux ${{ matrix.arch }}
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOSB_COPY_PLUGIN=OFF
+
+      - name: Build Plugins & Probes
+        run: >
+          cmake --build build -j4 --target
+          OldSchoolBox_VST3 OldSchoolBox_Standalone
+          state_probe acid303_probe kick_probe hats_probe aa_probe master_output_probe
+
+      - name: Run Verification Probes
+        run: |
+          xvfb-run -a ./build/state_probe
+          ./build/acid303_probe
+          ./build/kick_probe
+          ./build/hats_probe
+          ./build/aa_probe
+          ./build/master_output_probe
+
+      - name: Package Linux ${{ matrix.arch }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-manual}"
+          STAGE="dist/OldSchoolBox-${TAG}-Linux-${{ matrix.arch }}"
+          mkdir -p "${STAGE}"
+          cp -R build/OldSchoolBox_artefacts/Release/VST3/OldSchoolBox.vst3 "${STAGE}/"
+          cp build/OldSchoolBox_artefacts/Release/Standalone/OldSchoolBox "${STAGE}/"
+          cp LICENSE README.md "${STAGE}/"
+          tar -C dist -czf "dist/OldSchoolBox-${TAG}-Linux-${{ matrix.arch }}.tar.gz" "OldSchoolBox-${TAG}-Linux-${{ matrix.arch }}"
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa1b2ef267ace # v2.2.1
+        with:
+          generate_release_notes: true
+          files: release-assets/*
