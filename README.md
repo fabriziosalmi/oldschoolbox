@@ -1,12 +1,12 @@
 # OldSchoolBox MKII
 
-An 8-channel procedural Acid / Free Tekno groovebox + underground sample chaos bus, built with JUCE 8 as a **VST3 / AU plugin and macOS Standalone app**.
-All 8 synth and drum voices are synthesized from scratch, paired with an RT-safe Chaos Sample Bus, hardware-inspired MKII arcade CRT UI, and live DJ performance controls.
+An 8-channel procedural Acid / Free Tekno groovebox + underground sample chaos bus, built with JUCE 8 as a **cross-platform VST3 / AU plugin and Standalone app (macOS Universal, Windows x64, Linux x86_64 & arm64)**.
+All 8 synth and drum voices are synthesized from scratch, paired with an RT-safe Chaos Sample Bus, SpiralFx performance dub unit, 13 hardware skins, and live DJ performance controls.
 
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![Format](https://img.shields.io/badge/format-VST3%20%7C%20AU%20%7C%20Standalone-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-0.7.2--MKII-orange)
+![Version](https://img.shields.io/badge/version-0.7.3--MKII-orange)
 
 ![OldSchoolBox MKII](screenshot.png)
 
@@ -60,11 +60,12 @@ Muted or non-soloed channels still tick their sidechain envelopes to avoid state
 - **Direct DAW Drag & Drop (`WAV>` / `MID>`)**: drag directly into Ableton, FL Studio, or Bitwig to export a 4-bar 24-bit WAV loop or multi-channel Drums + 303 Acid MIDI clip with zero save dialogs.
 
 ### MKII Hardware UI Craft (60 FPS)
-- **Ghost Dots**: luminous indicator on each knob arc showing the saved Scene value.
-- **Live Modulation Rings**: secondary glowing arc showing active sidechain, `AUTO`, and `CHAOS` modulation.
-- **Engineering Units HUD**: top CRT terminal displays real units on hover/drag (`55.0 Hz (A1)`, `185 ms`, `1.42 kHz`, `+9.0 dB [MACKIE SAT]`).
-- **Phase-Locked CRT Oscilloscope**: rising zero-crossing trigger keeps the 303 waveform locked and readable at 155+ BPM.
-- **Optical LED Persistence, Ambient Light Bleed, Hover Spotlight, 350 ms CRT Power-On, 70%-200% Vector Scaling**, and live **`THEME`** switcher (`RAVE` / `CRT` / `AMB`).
+- **13 Hardware Themes (`THEME` — Click: next | Shift+Click: menu)**: `OBSIDIAN`, `TR-909`, `ACID 303`, `CRT-98`, `SPIRAL`, `PIANO LED` (gleuomorphic piano-black gloss), `PORCELAIN` (ceramic white), `GAMEBOY`, `MIAMI 84`, `AMBER 82`, `TOXIC BIO`, `SAKURA`, and `GOLD MK2`.
+- **4-Slot Quick Jam Presets (`1 | 2 | 3 | 4` per channel)**: 1-click groove switching per instrument directly on each strip (`Shift+Click` saves custom groove, `Alt+Click` generates a variation).
+- **SpiralFx (`SPIRAL` + `DRV`)**: dedicated beat-synced Jet Flanger + 3/16 Gated Decaying Dub Delay + Distortion routed exclusively from `PERC 1`, `PERC 2`, and `CHAOS` (click: 2-beat throw; `Shift+Click`: latch).
+- **Beat-Synced Visual FX (`VIZ: OFF / SUB / RAVE`)**: 100% UI-thread reactive lighting (channel trigger halos, performance FX aura, chassis edge sub-bass bars, and animated Space Invaders arcade fleet with UFO Mothership & lasers reacting to bass, mids, and highs).
+- **Symmetric 3-Pillar Top Bar & Non-Intrusive Info View**: airgapped native vector icons, DIN 5-pin MIDI Out toggle, and centered hover/telemetry bar aligned over the CRT core.
+- **Master Output Fader (`OUT`) + 1176/SSL GR Meter**: dedicated vertical Master fader next to the L/R peak-hold meters, plus Ghost Dots, Live Modulation Rings, and Engineering Units HUD (`55.0 Hz (A1)`, `185 ms`, `+9.0 dB [MACKIE SAT]`).
 
 ---
 
